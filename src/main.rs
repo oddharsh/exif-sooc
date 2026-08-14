@@ -5,7 +5,7 @@
 //! selection, `-Group:Tag`, the `#` numeric suffix and `-json` all mean what
 //! they mean there.
 
-use exif_sooc::{json, read, Group, Photo};
+use exif_sooc::{json, read, site, Group, Photo};
 use std::path::{Path, PathBuf};
 
 const USAGE: &str = "\
@@ -30,6 +30,13 @@ OPTIONS
     -r            recurse into directories
     -t            tab-separated, one row per file
     --recipe      the Fujifilm recipe as a card
+    --keyed       one object keyed by filename stem, site record shape
+    --merge-into <FILE>
+                  merge --keyed output into an existing keyed FILE and print
+                  the result. A stem the read did not see is passed through
+                  untouched; a key within a touched stem that this tool does
+                  not produce (a recipe card, say) is PRESERVED. Implies
+                  --keyed. Writes to stdout, never to FILE.
     -h, --help    this
     -V, --version version
 ";
@@ -46,6 +53,9 @@ enum Mode {
     Json,
     Tsv,
     Recipe,
+    /// The stem-keyed record shape aadhar.sh stores. Additive: `-json` stays
+    /// byte-identical to ExifTool, which is what the corpus diff tests.
+    Keyed,
 }
 
 fn main() {
@@ -53,9 +63,20 @@ fn main() {
     let mut select: Vec<Sel> = Vec::new();
     let mut mode = Mode::Json;
     let (mut quiet, mut groups, mut numeric_all, mut recurse) = (false, false, false, false);
+    let mut merge_into: Option<PathBuf> = None;
+    let mut want_merge_path = false;
 
     for a in std::env::args().skip(1) {
+        if want_merge_path {
+            merge_into = Some(PathBuf::from(&a));
+            want_merge_path = false;
+            continue;
+        }
         match a.as_str() {
+            "--merge-into" => {
+                want_merge_path = true;
+                mode = Mode::Keyed;
+            }
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return;
@@ -67,6 +88,7 @@ fn main() {
             "-json" | "-j" | "--json" => mode = Mode::Json,
             "-t" | "--tsv" => mode = Mode::Tsv,
             "--recipe" => mode = Mode::Recipe,
+            "--keyed" => mode = Mode::Keyed,
             "-q" | "-q -q" => quiet = true,
             "-G" | "-G0" | "-G1" => groups = true,
             "-n" => numeric_all = true,
@@ -106,6 +128,10 @@ fn main() {
         }
     }
 
+    if want_merge_path {
+        eprintln!("exif-sooc: --merge-into needs a file path");
+        std::process::exit(2);
+    }
     if paths.is_empty() {
         print!("{USAGE}");
         std::process::exit(2);
@@ -155,6 +181,32 @@ fn main() {
     }
 
     match mode {
+        Mode::Keyed => {
+            // A merge READS the file and prints the result. It never writes in
+            // place: the caller redirects, so a crash mid-write cannot leave a
+            // truncated metadata.json where a complete one was.
+            match &merge_into {
+                None => out.push_str(&site::keyed(&ok)),
+                Some(path) => match std::fs::read_to_string(path) {
+                    Ok(existing) => match site::merge_into(&existing, &ok) {
+                        Ok(merged) => out.push_str(&merged),
+                        Err(e) => {
+                            eprintln!("exif-sooc: {}: {e}", path.display());
+                            std::process::exit(1);
+                        }
+                    },
+                    // A missing file is the FIRST run, which is a normal state
+                    // rather than an error: there is nothing to preserve yet.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        out.push_str(&site::keyed(&ok))
+                    }
+                    Err(e) => {
+                        eprintln!("exif-sooc: {}: {e}", path.display());
+                        std::process::exit(1);
+                    }
+                },
+            }
+        }
         Mode::Json => {
             out.push_str("[\n");
             for (i, p) in ok.iter().enumerate() {
