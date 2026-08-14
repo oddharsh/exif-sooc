@@ -17,6 +17,13 @@ pub struct Dir<'a> {
     /// The block offsets are relative to.
     pub data: &'a [u8],
     pub le: bool,
+    /// Whether to drop trailing whitespace from ASCII values.
+    ///
+    /// ExifTool does for standard EXIF and does not for Fujifilm MakerNotes,
+    /// which is a difference in its processing path rather than in the format.
+    /// Measured by padding a Model with two spaces and asking it: `Model` comes
+    /// back trimmed, and Fujifilm's `Quality` keeps its "FINE   " padding.
+    pub trim_ascii: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -32,8 +39,22 @@ pub struct Entry {
 const FORMAT_SIZE: [usize; 14] = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4];
 
 impl<'a> Dir<'a> {
+    /// A standard EXIF directory.
     pub fn new(data: &'a [u8], le: bool) -> Self {
-        Self { data, le }
+        Self {
+            data,
+            le,
+            trim_ascii: true,
+        }
+    }
+
+    /// A MakerNotes directory, whose strings keep their padding.
+    pub fn maker(data: &'a [u8], le: bool) -> Self {
+        Self {
+            data,
+            le,
+            trim_ascii: false,
+        }
     }
 
     fn u16_at(&self, at: usize) -> Option<u16> {
@@ -81,17 +102,6 @@ impl<'a> Dir<'a> {
             .collect()
     }
 
-    /// Offset of the next IFD after the one at `at`, if any.
-    pub fn next_ifd(&self, at: usize) -> Option<usize> {
-        let count = self.u16_at(at)? as usize;
-        let n = self.u32_at(at + 2 + count * 12)?;
-        if n == 0 {
-            None
-        } else {
-            Some(n as usize)
-        }
-    }
-
     /// The bytes an entry's value occupies.
     ///
     /// Four bytes or fewer live inline in the entry itself; anything larger is
@@ -107,6 +117,20 @@ impl<'a> Dir<'a> {
         } else {
             let start = e.value as usize;
             self.data.get(start..start.checked_add(total)?)
+        }
+    }
+
+    /// The last byte an entry's value needs, when it lives outside the entry.
+    ///
+    /// Used to size the read window before walking a TIFF, where a value can
+    /// be addressed anywhere in the file.
+    pub fn value_end(&self, e: &Entry) -> Option<usize> {
+        let size = *FORMAT_SIZE.get(e.format as usize)?;
+        let total = size.checked_mul(e.count as usize)?;
+        if total <= 4 {
+            None
+        } else {
+            (e.value as usize).checked_add(total)
         }
     }
 
@@ -136,14 +160,8 @@ impl<'a> Dir<'a> {
             2 => {
                 let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
                 let s = String::from_utf8_lossy(&raw[..end]);
-                // Trailing SPACES are content-adjacent and are kept, because
-                // Fujifilm pads Quality to "FINE   " and ExifTool reports the
-                // padding. A field that is ENTIRELY blank is a different
-                // thing: cameras write 300 spaces into an unset Artist or
-                // Copyright, and that is an empty field rather than a string
-                // of spaces.
-                Value::Text(if s.trim().is_empty() {
-                    String::new()
+                Value::Text(if self.trim_ascii {
+                    s.trim_end().to_string()
                 } else {
                     s.to_string()
                 })

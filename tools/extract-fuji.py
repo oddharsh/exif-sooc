@@ -16,7 +16,7 @@ which is not a thing this should print by default. FlickerReduction prints in
 hex through an expression. Neither is worth rendering differently from
 ExifTool, and absent beats wrong.
 """
-import re, sys, pathlib
+import re, subprocess, sys, pathlib
 
 WANT = {
  0x1000:"Quality", 0x1001:"Sharpness", 0x1002:"WhiteBalance", 0x1003:"Saturation",
@@ -97,5 +97,9 @@ for tid in sorted(entries):
     else:
         out.append(f'    TagDef {{ id: {tid:#06x}, name: "{name}", conv: Conv::None }},')
 out.append("];")
-pathlib.Path("src/fuji_tags.rs").write_text("\n".join(out) + "\n")
-print(f"wrote src/fuji_tags.rs with {len(entries)} tags")
+out_path = pathlib.Path("src/fuji_tags.rs")
+out_path.write_text("\n".join(out) + "\n")
+# Format it here rather than leaving a file that fails `cargo fmt --check`,
+# which would make every regeneration look like a change to the whole table.
+subprocess.run(["rustfmt", "--edition", "2021", str(out_path)], check=False)
+print(f"wrote {out_path} with {len(entries)} tags")

@@ -56,8 +56,38 @@ fn find<'a>(d: &'a [u8], abs: u64, kind: &[u8; 4]) -> Option<Bx<'a>> {
     None
 }
 
+/// Where the `meta` box ends, read from the top-level box headers alone.
+fn meta_end(d: &[u8]) -> Option<usize> {
+    let mut off = 0usize;
+    while off + 8 <= d.len() {
+        let size = u32::from_be_bytes(d.get(off..off + 4)?.try_into().ok()?) as u64;
+        let kind = d.get(off + 4..off + 8)?;
+        let size = match size {
+            1 => u64::from_be_bytes(d.get(off + 8..off + 16)?.try_into().ok()?),
+            0 => return None,
+            n => n,
+        };
+        if kind == b"meta" {
+            return Some(off + size as usize);
+        }
+        let next = off.checked_add(size as usize)?;
+        if next <= off {
+            return None;
+        }
+        off = next;
+    }
+    None
+}
+
 /// Return the TIFF block of the EXIF item, and its absolute file position.
 pub fn exif(src: &mut Source) -> Option<(Vec<u8>, u64)> {
+    // The `meta` box declares its own size, so one look at the box headers says
+    // whether the window holds all of it.
+    if let Some(need) = meta_end(src.front()) {
+        if need > src.front().len() {
+            let _ = src.ensure(need);
+        }
+    }
     let front = src.front();
     let meta = find(front, 0, b"meta")?;
     // meta is a FullBox: four bytes of version and flags before its children.
@@ -84,7 +114,10 @@ pub fn exif(src: &mut Source) -> Option<(Vec<u8>, u64)> {
 fn exif_item_id(iinf: &[u8]) -> Option<u32> {
     let version = *iinf.first()?;
     let (count, mut off) = if version == 0 {
-        (u16::from_be_bytes(iinf.get(4..6)?.try_into().ok()?) as u32, 6)
+        (
+            u16::from_be_bytes(iinf.get(4..6)?.try_into().ok()?) as u32,
+            6,
+        )
     } else {
         (u32::from_be_bytes(iinf.get(4..8)?.try_into().ok()?), 8)
     };
@@ -128,7 +161,10 @@ fn locate(iloc: &[u8], want: u32) -> Option<(u64, usize)> {
         (sizes & 0xf) as usize,
     );
     let (count, mut p) = if version < 2 {
-        (u16::from_be_bytes(iloc.get(6..8)?.try_into().ok()?) as u32, 8)
+        (
+            u16::from_be_bytes(iloc.get(6..8)?.try_into().ok()?) as u32,
+            8,
+        )
     } else {
         (u32::from_be_bytes(iloc.get(6..10)?.try_into().ok()?), 10)
     };

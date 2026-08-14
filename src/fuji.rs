@@ -28,15 +28,26 @@ pub fn is_fuji(block: &[u8]) -> bool {
 
 pub fn parse(block: &[u8]) -> Vec<(&'static str, Value, String)> {
     let mut out = Vec::new();
+    let mut drive_settings: Option<u32> = None;
     if block.len() < 12 || !is_fuji(block) {
         return out;
     }
     let ifd = u32::from_le_bytes([block[8], block[9], block[10], block[11]]) as usize;
     // Fujifilm forces little-endian regardless of the file's own byte order.
-    let dir = Dir::new(block, true);
+    let dir = Dir::maker(block, true);
     for (i, e) in dir.entries(ifd).iter().enumerate() {
         let at = ifd + 2 + i * 12;
         let Some(v) = dir.value(e, at) else { continue };
+        if e.tag == 0x1103 {
+            drive_settings = match &v {
+                Value::U32(n) => Some(*n),
+                Value::Bytes(b) if b.len() >= 4 => {
+                    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                }
+                _ => None,
+            };
+            continue;
+        }
         let Some(def) = tags::find(FUJI, e.tag) else {
             continue;
         };
@@ -46,6 +57,36 @@ pub fn parse(block: &[u8]) -> Vec<(&'static str, Value, String)> {
         };
         out.push((def.name, v, print));
     }
+    // 0x1103 DriveSettings is a ProcessBinaryData table: one int32u carrying
+    // two masked fields. ExifTool: FujiFilm.pm:1159-1188.
+    //
+    // It is decoded here rather than through the tag table because the table
+    // is keyed by tag id and these two share one, which is exactly what
+    // ExifTool's fractional keys (0.1, 0.2) express.
+    if let Some(bits) = drive_settings {
+        let mode = bits & 0x0000_00ff;
+        let speed = (bits >> 24) & 0x0000_00ff;
+        out.push((
+            "DriveMode",
+            Value::U32(mode),
+            match mode {
+                0 => "Single".to_string(),
+                1 => "Continuous Low".to_string(),
+                2 => "Continuous High".to_string(),
+                n => n.to_string(),
+            },
+        ));
+        out.push((
+            "DriveSpeed",
+            Value::U32(speed),
+            if speed == 0 {
+                "n/a".to_string()
+            } else {
+                format!("{speed} fps")
+            },
+        ));
+    }
+
     // 0x100b is NoiseReduction only when it is not 0x100, which is the value
     // every X-series body writes to mean "not this tag". ExifTool drops it with
     // a RawConv (FujiFilm.pm:237); keeping it would collide with 0x100e, whose

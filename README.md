@@ -1,7 +1,10 @@
 # exif-sooc
 
 Camera metadata, and the whole Fujifilm film recipe, out of a folder of
-straight-out-of-camera files. JPEG, HEIF/HEIC and RAF.
+straight-out-of-camera files. JPEG, HEIF/HEIC, RAF and DNG.
+
+Reads a 16 KB window instead of the file, speaks ExifTool's command line, and
+proves itself by agreeing with ExifTool on every tag it prints.
 
 ```
 $ exif-sooc --recipe DSCF1234.HIF
@@ -40,18 +43,25 @@ on disk, warm page cache, best of three:
 
 | | total | per file |
 |---|--:|--:|
-| **exif-sooc** | **0.009s** | **0.1 ms** |
-| exiftool 13 | 1.04s | 6.5 ms |
-| exif-oxide (git) | 1.64s | 10.2 ms |
+| **exif-sooc** | **0.009s** | **0.06 ms** |
+| exiftool 13 | 0.99s | 6.21 ms |
+| exif-oxide (git) | 1.54s | 9.63 ms |
 
 The gap is I/O and process startup rather than parsing cleverness. ExifTool
 pays for Perl once per run; exif-oxide reads whole files.
+
+Worth being precise about where the remaining time goes, because it decides
+what is worth optimising next: **process startup is about 4 ms of that 9**, and
+the actual work is 25 to 35 microseconds per file, most of it the `open` and
+`read` themselves. There is no bulk data here for SIMD to touch, and the files
+are already read in parallel across cores. It is syscall-bound, which is a
+polite way of saying it is finished.
 
 ## Is it right?
 
 That is the part worth being suspicious of, so it is the part with a gate.
 
-Over those same 160 files, **every one of the 9,784 tags exif-sooc emits agrees
+Over those same 160 files, **every one of the 11,050 tags exif-sooc emits agrees
 with `exiftool -j -G`, byte for byte**. The contract is one-directional on
 purpose: anything this tool prints has to match, and tags ExifTool reports that
 this does not are out of scope. It was never trying to be ExifTool.
@@ -66,6 +76,33 @@ There are synthetic tests for the containers too, each pinning a way a file can
 be read wrongly while still parsing, which is the failure mode that actually
 happens: a wrong base offset or a wrong field width leaves the numbers looking
 right and quietly empties every string.
+
+## Drop-in for ExifTool
+
+The command line is shaped like ExifTool's, because the point is to be
+swappable into a pipeline that already calls it. Tag selection, `-Group:Tag`,
+the `#` numeric suffix and `-json` mean what they mean there.
+
+```sh
+exif-sooc -json -q -Make -Model -FilmMode -FujiFilm:Sharpness -Orientation# ~/Pictures
+```
+
+That exact invocation, taken from a production photo pipeline with 36 selected
+tags, produces **byte-identical JSON to ExifTool across 160 files**, which
+`tools/compare-pipeline.sh` checks.
+
+| | |
+|---|---|
+| `-json`, `-j` | JSON, one object per file (the default, and the only structured format) |
+| `-TagName` | select tags; keys come back unqualified, as ExifTool does |
+| `-Group:TagName` | disambiguate when two tags share a name |
+| `-TagName#` | the raw value rather than the readable one |
+| `-n` | raw values for everything |
+| `-G`, `-G0` | qualify keys with the group |
+| `-q`, `-r`, `-t`, `-s` | quiet, recurse, tab-separated, short names |
+
+Tags this does not know are absent rather than guessed at, which is the same
+result as ExifTool's default of hiding unknown tags.
 
 ## Install
 
@@ -119,12 +156,16 @@ the wrong aspect ratio.
 ## What it will not do
 
 - **Every camera brand.** Fujifilm MakerNotes are decoded in full. Every other
-  body gets core EXIF, which is most of what anyone reads. Leica, Canon, Nikon
-  and Sony maker notes are not touched.
+  body gets core EXIF, which is most of what anyone reads and is all a Leica M
+  writes anyway. Canon, Nikon and Sony maker notes are not touched.
+- **RAF raw dimensions.** A RAF's EXIF describes its embedded preview, and the
+  raw frame size lives in the RAF header's CFA block, which is not parsed. Those
+  two tags are absent rather than filled with the preview's size.
 - **Every tag.** About 70 standard EXIF tags and 42 Fujifilm ones, chosen
   because a photographer reads them.
 - **Writing.** This only reads.
-- **RAW image data.** RAF is read for its metadata by way of the embedded JPEG.
+- **RAW image data.** RAF is read by way of its embedded JPEG, and a DNG is a
+  TIFF, so both give up their metadata without decoding a single pixel.
 
 For any of those, use [ExifTool](https://exiftool.org). It is the real thing
 and this is not trying to replace it.

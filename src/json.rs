@@ -23,10 +23,11 @@ pub fn escape(s: &str, out: &mut String) {
 /// a string. A value that merely looks numeric ("0130", a Fujifilm version) is
 /// deliberately left quoted, since dropping its leading zero would change it.
 pub fn scalar(s: &str, out: &mut String) {
-    let numeric = !s.is_empty()
-        && s.parse::<f64>().is_ok()
-        && !(s.len() > 1 && s.starts_with('0') && !s.starts_with("0."))
-        && !s.starts_with('+');
+    // A value that merely looks numeric stays a string when quoting is the only
+    // way to keep it intact: "0130" is a Fujifilm version, and unquoting it
+    // would drop the leading zero.
+    let looks_padded = s.len() > 1 && s.starts_with('0') && !s.starts_with("0.");
+    let numeric = s.parse::<f64>().is_ok() && !looks_padded && !s.starts_with('+');
     if numeric {
         out.push_str(s);
     } else {

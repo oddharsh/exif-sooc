@@ -161,6 +161,14 @@ static EXPOSURE_MODE: &[(i64, &str)] = &[(0, "Auto"), (1, "Manual"), (2, "Auto b
 
 static WHITE_BALANCE: &[(i64, &str)] = &[(0, "Auto"), (1, "Manual")];
 
+/// A DNG marks its full-resolution frame here, which is how a raw file says
+/// which of its several images is the photograph.
+static SUBFILE_TYPE: &[(i64, &str)] = &[
+    (0, "Full-resolution image"),
+    (1, "Reduced-resolution image"),
+    (2, "Single page of multi-page image"),
+];
+
 static RESOLUTION_UNIT: &[(i64, &str)] = &[(1, "None"), (2, "inches"), (3, "cm")];
 
 static SCENE_CAPTURE: &[(i64, &str)] = &[
@@ -207,40 +215,179 @@ static FLASH: &[(i64, &str)] = &[
 
 /// Standard EXIF, sorted by tag id.
 pub static EXIF: &[TagDef] = &[
-    TagDef { id: 0x010f, name: "Make", conv: Conv::None },
-    TagDef { id: 0x0110, name: "Model", conv: Conv::None },
-    TagDef { id: 0x0112, name: "Orientation", conv: Conv::Map(ORIENTATION) },
-    TagDef { id: 0x011a, name: "XResolution", conv: Conv::None },
-    TagDef { id: 0x011b, name: "YResolution", conv: Conv::None },
-    TagDef { id: 0x0128, name: "ResolutionUnit", conv: Conv::Map(RESOLUTION_UNIT) },
-    TagDef { id: 0x0131, name: "Software", conv: Conv::None },
-    TagDef { id: 0x0132, name: "ModifyDate", conv: Conv::None },
-    TagDef { id: 0x013b, name: "Artist", conv: Conv::None },
-    TagDef { id: 0x8298, name: "Copyright", conv: Conv::None },
-    TagDef { id: 0x829a, name: "ExposureTime", conv: Conv::Fn(exposure_time) },
-    TagDef { id: 0x829d, name: "FNumber", conv: Conv::Fn(fnumber) },
-    TagDef { id: 0x8822, name: "ExposureProgram", conv: Conv::Map(EXPOSURE_PROGRAM) },
-    TagDef { id: 0x8827, name: "ISO", conv: Conv::None },
-    TagDef { id: 0x9003, name: "DateTimeOriginal", conv: Conv::None },
-    TagDef { id: 0x9004, name: "CreateDate", conv: Conv::None },
-    TagDef { id: 0x9204, name: "ExposureCompensation", conv: Conv::Fn(ev) },
-    TagDef { id: 0x9207, name: "MeteringMode", conv: Conv::Map(METERING) },
-    TagDef { id: 0x9209, name: "Flash", conv: Conv::Map(FLASH) },
-    TagDef { id: 0x920a, name: "FocalLength", conv: Conv::Fn(focal_mm) },
-    TagDef { id: 0x9291, name: "SubSecTimeOriginal", conv: Conv::None },
-    TagDef { id: 0xa001, name: "ColorSpace", conv: Conv::Map(COLOR_SPACE) },
-    TagDef { id: 0xa002, name: "ExifImageWidth", conv: Conv::None },
-    TagDef { id: 0xa003, name: "ExifImageHeight", conv: Conv::None },
-    TagDef { id: 0xa402, name: "ExposureMode", conv: Conv::Map(EXPOSURE_MODE) },
-    TagDef { id: 0xa403, name: "WhiteBalance", conv: Conv::Map(WHITE_BALANCE) },
-    TagDef { id: 0xa405, name: "FocalLengthIn35mmFormat", conv: Conv::Fn(focal_mm_int) },
-    TagDef { id: 0xa406, name: "SceneCaptureType", conv: Conv::Map(SCENE_CAPTURE) },
-    TagDef { id: 0xa433, name: "LensMake", conv: Conv::None },
-    TagDef { id: 0xa434, name: "LensModel", conv: Conv::None },
+    TagDef {
+        id: 0x00fe,
+        name: "SubfileType",
+        conv: Conv::Map(SUBFILE_TYPE),
+    },
+    TagDef {
+        id: 0x0100,
+        name: "ImageWidth",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x0101,
+        name: "ImageHeight",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x010f,
+        name: "Make",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x0110,
+        name: "Model",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x0112,
+        name: "Orientation",
+        conv: Conv::Map(ORIENTATION),
+    },
+    TagDef {
+        id: 0x011a,
+        name: "XResolution",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x011b,
+        name: "YResolution",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x0128,
+        name: "ResolutionUnit",
+        conv: Conv::Map(RESOLUTION_UNIT),
+    },
+    TagDef {
+        id: 0x0131,
+        name: "Software",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x0132,
+        name: "ModifyDate",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x013b,
+        name: "Artist",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x8298,
+        name: "Copyright",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x829a,
+        name: "ExposureTime",
+        conv: Conv::Fn(exposure_time),
+    },
+    TagDef {
+        id: 0x829d,
+        name: "FNumber",
+        conv: Conv::Fn(fnumber),
+    },
+    TagDef {
+        id: 0x8822,
+        name: "ExposureProgram",
+        conv: Conv::Map(EXPOSURE_PROGRAM),
+    },
+    TagDef {
+        id: 0x8827,
+        name: "ISO",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x9003,
+        name: "DateTimeOriginal",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x9004,
+        name: "CreateDate",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0x9204,
+        name: "ExposureCompensation",
+        conv: Conv::Fn(ev),
+    },
+    TagDef {
+        id: 0x9207,
+        name: "MeteringMode",
+        conv: Conv::Map(METERING),
+    },
+    TagDef {
+        id: 0x9209,
+        name: "Flash",
+        conv: Conv::Map(FLASH),
+    },
+    TagDef {
+        id: 0x920a,
+        name: "FocalLength",
+        conv: Conv::Fn(focal_mm),
+    },
+    TagDef {
+        id: 0x9291,
+        name: "SubSecTimeOriginal",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0xa001,
+        name: "ColorSpace",
+        conv: Conv::Map(COLOR_SPACE),
+    },
+    TagDef {
+        id: 0xa002,
+        name: "ExifImageWidth",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0xa003,
+        name: "ExifImageHeight",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0xa402,
+        name: "ExposureMode",
+        conv: Conv::Map(EXPOSURE_MODE),
+    },
+    TagDef {
+        id: 0xa403,
+        name: "WhiteBalance",
+        conv: Conv::Map(WHITE_BALANCE),
+    },
+    TagDef {
+        id: 0xa405,
+        name: "FocalLengthIn35mmFormat",
+        conv: Conv::Fn(focal_mm_int),
+    },
+    TagDef {
+        id: 0xa406,
+        name: "SceneCaptureType",
+        conv: Conv::Map(SCENE_CAPTURE),
+    },
+    TagDef {
+        id: 0xa433,
+        name: "LensMake",
+        conv: Conv::None,
+    },
+    TagDef {
+        id: 0xa434,
+        name: "LensModel",
+        conv: Conv::None,
+    },
 ];
 
 /// Tags whose value is a pointer to another directory.
 pub const EXIF_IFD: u16 = 0x8769;
+/// A DNG keeps its real image in a SubIFD and leaves IFD0 holding a thumbnail,
+/// so a raw file that is not walked into reports an 8x8 frame.
+pub const SUB_IFD: u16 = 0x014a;
+pub const SUBFILE_TYPE_TAG: u16 = 0x00fe;
 pub const MAKER_NOTE: u16 = 0x927c;
 
 /// Fujifilm tags needing a formatter rather than a lookup. Applied on top of

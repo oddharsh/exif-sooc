@@ -12,7 +12,7 @@ import json, subprocess, sys, os, glob, collections
 BIN = os.environ.get("EXIF_SOOC", "target/release/exif-sooc")
 root = sys.argv[1]
 files = sorted(
-    f for ext in ("HIF","JPG","jpg","heic","HEIC","raf","RAF")
+    f for ext in ("HIF","JPG","jpg","heic","HEIC","raf","RAF","dng","DNG","tif","tiff")
     for f in glob.glob(os.path.join(root, f"*.{ext}"))
 )
 if not files:
@@ -30,7 +30,7 @@ def batched(cmd, chunk=40):
     return {os.path.abspath(d["SourceFile"]): d for d in out}
 
 et = batched(["exiftool", "-j", "-G"])
-ours = batched([BIN, "--json"])
+ours = batched([BIN, "-json", "-G"])
 
 # exiftool puts Fuji tags in group1 "FujiFilm" under -G1 but group0 "MakerNotes"
 # under -G, so ours are matched by name within either.
@@ -66,6 +66,13 @@ for f in files:
             ok += 1
 
 print(f"{len(files)} files: {ok} tags agree, {bad} disagree")
+
+# A comparison that checked nothing must not read as a pass. This exact thing
+# happened once: the CLI changed to unqualified keys by default, the group
+# filter below stopped matching anything, and the harness reported success
+# while comparing zero tags.
+if ok == 0:
+    sys.exit("compared 0 tags, which means the harness is broken rather than the tool")
 if mismatch:
     print("\nmismatches:")
     for name, n in mismatch.most_common(20):
