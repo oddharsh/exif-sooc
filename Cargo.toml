@@ -1,0 +1,22 @@
+[package]
+name = "exif-sooc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Read camera metadata, and Fujifilm film recipes, out of SOOC files without reading the whole file"
+license = "MIT"
+repository = "https://github.com/oddharsh/exif-sooc"
+keywords = ["exif", "metadata", "fujifilm", "heif", "photography"]
+categories = ["multimedia::images", "command-line-utilities"]
+
+# No dependencies, on purpose. Everything here is byte layout and lookup
+# tables, so a dependency would buy nothing and cost build time, binary size
+# and a supply chain.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

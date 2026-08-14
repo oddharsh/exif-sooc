@@ -1,0 +1,16 @@
+exif-sooc stands on ExifTool.
+
+Phil Harvey's ExifTool (https://exiftool.org) is 25 years of camera-specific
+knowledge, and every byte layout and lookup table here was checked against it.
+Where this repository cites a file and line, that citation is into ExifTool's
+source, so a reader can go and see why a field is the way it is.
+
+The Fujifilm tag table in src/fuji_tags.rs is generated from ExifTool's
+FujiFilm.pm by tools/extract-fuji.py, and the test suite's correctness gate is
+agreement with ExifTool over a folder of real photographs.
+
+ExifTool is distributed under the Perl Artistic License and the GNU General
+Public License. It is not bundled here and is not a dependency of this crate;
+it is used as the reference and as the oracle the tests compare against.
+
+Thank you to Phil Harvey.
