@@ -120,7 +120,39 @@ size and a supply chain. The release binary is about 420 KB.
 exif-sooc --recipe  photo.HIF        # the recipe card above
 exif-sooc --json    ~/Pictures/sooc  # one object per file, exiftool-shaped keys
 exif-sooc --tsv     ~/Pictures/sooc  # a row per file, for a spreadsheet
+exif-sooc --keyed   ~/Pictures/sooc  # one object keyed by filename stem
 ```
+
+### Keeping an index up to date
+
+`--keyed` emits `{stem: {…}}` rather than ExifTool's array, and `--merge-into`
+folds a fresh read into an index you already have:
+
+```sh
+exif-sooc --merge-into metadata.json -q new-photos/ > tmp && mv tmp metadata.json
+```
+
+The merge exists because the obvious shell version is wrong in a way that does
+not announce itself. `jq -s '.[0] * .[1]'` is a RECURSIVE merge; the reflexive
+substitute `+` is shallow and silently drops any key the fresh read does not
+produce. So the rule here is explicit:
+
+- a stem the read did not see passes through untouched
+- a stem it did see keeps every key it already had, with the freshly read
+  fields written over the top
+
+That second line is what preserves a field some later step owns, such as a
+derived recipe card or a baked histogram. Values this tool does not recognise
+are copied as raw text, so they round-trip byte-exact.
+
+It prints to stdout and never writes to the file it read, so a crash cannot
+leave a truncated index where a complete one was. A missing file is treated as
+a first run rather than an error. Malformed input is refused outright, since
+half-reading an index and writing the result is how a good file becomes a bad
+one.
+
+`--keyed` and `--merge-into` are ADDITIVE. `-json` is untouched, which is what
+the 160-file ExifTool corpus diff actually tests.
 
 A directory is scanned one level deep for `.jpg`, `.jpeg`, `.heif`, `.heic`,
 `.hif` and `.raf`. Files are read in parallel.

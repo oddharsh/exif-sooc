@@ -22,6 +22,7 @@ mod jpeg;
 pub mod json;
 mod raf;
 mod read;
+pub mod site;
 pub mod tags;
 mod tiff;
 pub mod value;
