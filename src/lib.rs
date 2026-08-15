@@ -167,6 +167,7 @@ pub fn read(path: impl AsRef<Path>) -> Result<Photo, Error> {
     let mut src = read::Source::open(path)?;
     let format = sniff(src.front()).ok_or(Error::Unsupported)?;
     let mut raf_model = None;
+    let mut raf_size = None;
 
     let (tiff, _at) = match format {
         Format::Jpeg => jpeg::exif(&mut src).ok_or(Error::NoExif)?,
@@ -174,6 +175,10 @@ pub fn read(path: impl AsRef<Path>) -> Result<Photo, Error> {
         Format::Raf => {
             raf_model = raf::model(&src);
             let (mut inner, base) = raf::jpeg(&mut src).ok_or(Error::NoExif)?;
+            // The embedded JPEG is the whole of what a RAF shows a reader, so
+            // its SOF is the size ExifTool reports. Read here because this is
+            // where that JPEG exists; it is a window into the RAF, not the file.
+            raf_size = jpeg::dimensions(&inner);
             let (t, off) = jpeg::exif(&mut inner).ok_or(Error::NoExif)?;
             (t, base + off)
         }
@@ -197,11 +202,20 @@ pub fn read(path: impl AsRef<Path>) -> Result<Photo, Error> {
             push_size(&mut tags, w, h);
         }
     }
-    // Not for RAF. ExifTool reports the RAW frame size there, read out of the
-    // RAF header's CFA block, while the EXIF inside describes the embedded
-    // JPEG preview. Mirroring the preview's size would put a confidently wrong
-    // number under the name a caller trusts. The header parse needs a real RAF
-    // to verify against, and ExifTool's own sample is truncated to 38 KB.
+    // A RAF is measured rather than mirrored. This was left unread until a real
+    // RAF could settle what belongs here, since ExifTool's own sample is
+    // truncated to 38 KB, and the guess at the time was that the name carried
+    // the RAW frame size. An X-T5 file says otherwise: ExifTool reports
+    // 4416x2944, the embedded JPEG's SOF, and puts the RAW frame under
+    // MakerNotes:RawImageWidth (7752x5184) where it cannot be confused for it.
+    //
+    // The SOF and not the EXIF pair, even though they agree on that file. One
+    // is the embedded image measured, the other is what the camera wrote down
+    // about it, and a RAF whose SOF cannot be read is better off saying nothing
+    // than repeating a claim nothing checked.
+    if let Some((w, h)) = raf_size {
+        push_size(&mut tags, w, h);
+    }
     if format != Format::Raf {
         add_image_size(&mut tags);
     }
