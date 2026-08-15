@@ -112,7 +112,7 @@ fn dims(p: &Photo) -> (Option<i64>, Option<i64>) {
 /// One photo's 32 fields, in order, as raw JSON fragments ("null" included).
 fn record(p: &Photo) -> Vec<(&'static str, String)> {
     let lit = |s: Option<String>| -> String {
-        match s.filter(|v| !v.is_empty()) {
+        match s {
             Some(v) => {
                 let mut o = String::new();
                 json::scalar(&v, &mut o);
@@ -132,7 +132,15 @@ fn record(p: &Photo) -> Vec<(&'static str, String)> {
 
     let out = vec![
         ("camera", lit(p.camera())),
-        ("lens", lit(p.lens())),
+        // The TAG, not Photo::lens(), which filters an empty string away. jq's
+        // `//` replaces null alone and "" is truthy there, so a body reporting
+        // an empty LensModel (an adapted manual lens, no electronic contacts)
+        // stores "" rather than null. 11 of 158 frames here are that case.
+        // Whether "" or null is the better record is a real question and a
+        // SEPARATE one: null means the tooltip skips the line, "" means it
+        // renders an empty one. Changing it is a visible change to the site, so
+        // it is not smuggled in as a side effect of this port.
+        ("lens", lit(txt("LensModel"))),
         ("aperture", lit(txt("FNumber").map(|v| format!("f/{v}")))),
         ("shutter", lit(txt("ExposureTime"))),
         ("iso", lit(txt("ISO"))),
@@ -182,11 +190,39 @@ fn record(p: &Photo) -> Vec<(&'static str, String)> {
     out
 }
 
+/// The 32 fields plus the derived `recipe` card, when the frame has one.
+///
+/// Kept separate from `record()` so FIELDS stays the exact contract of the
+/// flat part and its debug_assert keeps meaning something.
+fn record_full(p: &Photo) -> Vec<(&'static str, String)> {
+    let mut r = record(p);
+    if let Some(card) = recipe_card(p) {
+        let mut o = String::from("{\n");
+        for (i, (k, v)) in card.iter().enumerate() {
+            if i > 0 {
+                o.push_str(",\n");
+            }
+            o.push_str("      ");
+            json::escape(k, &mut o);
+            o.push_str(": ");
+            // ALWAYS a string, never scalar(). A card value is a formatted
+            // display string: "0", "+2", "-1", "DR400", "-1/3". scalar() would
+            // unquote whichever of them happen to parse as numbers, so the type
+            // would depend on the SIGN ("-1" a number, "+2" a string) and a
+            // consumer would have to handle both for one column.
+            json::escape(v, &mut o);
+        }
+        o.push_str("\n    }");
+        r.push(("recipe", o));
+    }
+    r
+}
+
 /// `{stem: {…}}` for the photos read, with no merge.
 pub fn keyed(photos: &[&Photo]) -> String {
     let mut m: BTreeMap<String, Vec<(&str, String)>> = BTreeMap::new();
     for p in photos {
-        m.insert(stem(p), record(p));
+        m.insert(stem(p), record_full(p));
     }
     let mut out = String::from("{\n");
     for (i, (k, rec)) in m.iter().enumerate() {
@@ -224,7 +260,7 @@ fn write_entry<'a>(key: &str, fields: impl Iterator<Item = (&'a str, &'a str)>, 
 /// key within a touched stem that the read does not produce is preserved.
 pub fn merge_into(existing: &str, photos: &[&Photo]) -> Result<String, String> {
     let fresh: Vec<(String, Vec<(&str, String)>)> =
-        photos.iter().map(|p| (stem(p), record(p))).collect();
+        photos.iter().map(|p| (stem(p), record_full(p))).collect();
     merge_records(existing, &fresh)
 }
 
@@ -408,6 +444,228 @@ fn skip_value(b: &[u8], i: &mut usize) -> Result<(), String> {
     }
 }
 
+// ── the recipe card ──────────────────────────────────────────────────────────
+//
+// The fujixweekly idiom: what the photographer SET, not what the sensor wrote.
+// "Standard" is not a dynamic range, "Soft" is not a sharpness, and
+// "Red +40, Blue -100" is not how anyone writes a WB shift.
+//
+// Ported from aadhar.sh's build-recipes.py, which derived this from a flattened
+// 32-field record. This reads the TAGS instead, which removes that hop.
+//
+// WHERE "FROM RAW" STOPS, because it is not where you would guess. Fuji stores
+// the tone knobs as internal codes: Sharpness 130, ShadowTone -32,
+// NoiseReduction 736. The code-to-setting mapping already lives in this crate's
+// Fuji print logic, so reading `.value` for those and re-deriving the mapping
+// would be a SECOND copy of a lookup table that already exists. The setting
+// number is the leading token of `.print` ("-1 (medium soft)"), so that is what
+// is read. Raw values ARE used where they are genuinely numbers and the print
+// form is a lossy rendering of them: the WB fine-tune pair, the development
+// dynamic range, and exposure compensation.
+
+/// The leading signed integer of a friendly Fuji string: "-1 (medium soft)" -> -1.
+fn leading_num(s: &str) -> Option<i64> {
+    let t = s.trim();
+    let (sign, rest) = match t.strip_prefix('-') {
+        Some(r) => (-1, r),
+        None => (1, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<i64>().ok().map(|n| sign * n)
+    }
+}
+
+/// Recipe cards always show the sign: 0 -> "0", 2 -> "+2".
+fn signed(n: i64) -> String {
+    if n > 0 {
+        format!("+{n}")
+    } else {
+        n.to_string()
+    }
+}
+
+/// EV as the fraction a card prints. -0.33 -> "-1/3", 1.0 -> "+1".
+fn thirds(ev: f64) -> String {
+    let steps = (ev * 3.0).round() as i64; // EV is set in 1/3-stop clicks
+    if steps == 0 {
+        return "0".to_string();
+    }
+    let (whole, rem) = (steps.abs() / 3, steps.abs() % 3);
+    let sign = if steps > 0 { "+" } else { "-" };
+    match (whole, rem) {
+        (w, 0) => format!("{sign}{w}"),
+        (0, r) => format!("{sign}{r}/3"),
+        (w, r) => format!("{sign}{w} {r}/3"),
+    }
+}
+
+/// "F0/Standard (Provia)" -> "Provia/Standard"; anything else passes through.
+fn film_name(raw: &str) -> String {
+    if let (Some(open), true) = (raw.find('('), raw.contains('/')) {
+        if let Some(close) = raw[open..].find(')') {
+            let inner = &raw[open + 1..open + close];
+            let after_slash = raw.split('/').nth(1).unwrap_or("");
+            let name = after_slash.split(" (").next().unwrap_or(after_slash);
+            return format!("{inner}/{name}");
+        }
+    }
+    raw.to_string()
+}
+
+/// Fuji's WB fine-tune is stored in units of 20 per on-camera step, so the raw
+/// pair `40 -100` is what the photographer set as "+2 Red & -5 Blue".
+const WB_STEP: i64 = 20;
+
+fn is_bw(sat: Option<&str>) -> bool {
+    let s = sat.unwrap_or("").to_ascii_lowercase();
+    ["acros", "monochrome", "b&w", "b & w", "bw", "sepia"]
+        .iter()
+        .any(|k| s.contains(k))
+}
+
+/// The card, ordered, or None when the frame is not a Fuji one.
+pub fn recipe_card(p: &Photo) -> Option<Vec<(String, String)>> {
+    let fuji = |n: &str| p.get_in(Group::Fuji, n).map(|t| t.print.clone());
+    let any = |n: &str| p.get(n).map(|t| t.print.clone());
+
+    let sat = fuji("Saturation");
+    let bw = is_bw(sat.as_deref());
+    // A B&W sim is the FILM, not a colour setting: Fuji leaves FilmMode blank
+    // and records the choice in Saturation.
+    let film = fuji("FilmMode")
+        .map(|f| film_name(&f))
+        .or_else(|| if bw { sat.clone() } else { None });
+
+    let mut card: Vec<(String, String)> = Vec::new();
+    let mut put = |k: &str, v: Option<String>| {
+        if let Some(v) = v.filter(|s| !s.is_empty()) {
+            card.push((k.to_string(), v));
+        }
+    };
+
+    put("Film Simulation", film.clone());
+    // The RAW value, because the print form of DynamicRange says "Standard"
+    // while DevelopmentDynamicRange carries the 100/200/400 that prints as DR.
+    put(
+        "Dynamic Range",
+        p.get_in(Group::Fuji, "DevelopmentDynamicRange")
+            .and_then(|t| t.value.as_i64())
+            .map(|n| format!("DR{n}")),
+    );
+    put("Grain Effect", grain_card(p));
+    put("Color Chrome Effect", fuji("ColorChromeEffect"));
+    put("Color Chrome FX Blue", fuji("ColorChromeFXBlue"));
+    put("White Balance", wb_card(p));
+
+    // The tone knobs print as bare signed numbers on a card.
+    for (key, tag) in [("Highlight", "HighlightTone"), ("Shadow", "ShadowTone")] {
+        put(key, fuji(tag).and_then(|v| leading_num(&v)).map(signed));
+    }
+    put(
+        "Color",
+        if bw {
+            None
+        } else {
+            sat.as_deref().and_then(leading_num).map(signed)
+        },
+    );
+    for (key, tag) in [
+        ("Sharpness", "Sharpness"),
+        ("High ISO NR", "NoiseReduction"),
+        ("Clarity", "Clarity"),
+    ] {
+        put(key, fuji(tag).and_then(|v| leading_num(&v)).map(signed));
+    }
+
+    // Exposure rides along: it is what the card's last two lines carry.
+    put("ISO", any("ISO"));
+    put(
+        "Exposure Compensation",
+        p.get("ExposureCompensation")
+            .and_then(|t| t.value.as_f64())
+            .map(thirds),
+    );
+
+    // No film sim and no recipe knobs means it is not a Fuji frame.
+    let has_knob = card.iter().any(|(k, _)| {
+        matches!(
+            k.as_str(),
+            "Dynamic Range" | "Grain Effect" | "Color Chrome Effect"
+        )
+    });
+    if film.is_none() && !has_knob {
+        return None;
+    }
+    Some(card)
+}
+
+/// "Weak, Small" — roughness then size; "Off" collapses to one word.
+fn grain_card(p: &Photo) -> Option<String> {
+    let rough = p.get_in(Group::Fuji, "GrainEffectRoughness")?.print.clone();
+    if rough.is_empty() {
+        return None;
+    }
+    if rough.eq_ignore_ascii_case("off") {
+        return Some("Off".into());
+    }
+    match p
+        .get_in(Group::Fuji, "GrainEffectSize")
+        .map(|t| t.print.clone())
+    {
+        Some(size) if !size.is_empty() && !size.eq_ignore_ascii_case("off") => {
+            Some(format!("{rough}, {size}"))
+        }
+        _ => Some(rough),
+    }
+}
+
+/// "Kelvin (4500K), +2 Red & -5 Blue" — base mode, then the fine-tune.
+fn wb_card(p: &Photo) -> Option<String> {
+    let mut base = p
+        .get_in(Group::Fuji, "WhiteBalance")
+        .or_else(|| p.get("WhiteBalance"))?
+        .print
+        .clone();
+    if base.is_empty() {
+        return None;
+    }
+    if base == "Kelvin" {
+        if let Some(k) = p.get("ColorTemperature").and_then(|t| t.value.as_i64()) {
+            base = format!("Kelvin ({k}K)");
+        }
+    }
+    // The RAW pair ("40 -100") rather than the print form ("Red +40, Blue
+    // -100"), so this reads two integers instead of a rendering of them.
+    let shift = match p.get_in(Group::Fuji, "WhiteBalanceFineTune") {
+        Some(t) => t,
+        None => return Some(base),
+    };
+    let nums: Vec<i64> = match &shift.value {
+        crate::Value::I32s(v) => v.iter().map(|n| *n as i64).collect(),
+        crate::Value::U32s(v) => v.iter().map(|n| *n as i64).collect(),
+        // A single-valued or textual encoding still has to yield the pair, so
+        // fall back to the decoded print form rather than silently dropping the
+        // shift line off the card.
+        _ => shift
+            .print
+            .split(|c: char| !c.is_ascii_digit() && c != '-')
+            .filter(|w| !w.is_empty() && *w != "-")
+            .filter_map(|w| w.parse::<i64>().ok())
+            .collect(),
+    };
+    if nums.len() < 2 {
+        return Some(base);
+    }
+    let (r, b) = (nums[0] / WB_STEP, nums[1] / WB_STEP);
+    if r == 0 && b == 0 {
+        return Some(format!("{base}, 0 shift"));
+    }
+    Some(format!("{base}, {} Red & {} Blue", signed(r), signed(b)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,6 +767,51 @@ mod tests {
         let b = out.find("brand_new").unwrap();
         assert!(z < c, "existing order must hold");
         assert!(c < b, "a genuinely new field lands after the existing ones");
+    }
+
+    #[test]
+    fn a_card_prints_the_setting_not_the_stored_code() {
+        // Fuji stores the tone knobs as internal codes (Sharpness 130,
+        // ShadowTone -32, NoiseReduction 736). The setting number is the
+        // leading token of the decoded string, which is what a card shows.
+        assert_eq!(leading_num("-1 (medium soft)"), Some(-1));
+        assert_eq!(leading_num("+3 (very high)"), Some(3));
+        assert_eq!(leading_num("0"), Some(0));
+        assert_eq!(leading_num("Strong"), None);
+        assert_eq!(signed(0), "0");
+        assert_eq!(signed(2), "+2");
+        assert_eq!(signed(-2), "-2");
+    }
+
+    #[test]
+    fn exposure_compensation_prints_as_thirds() {
+        // EV is set in 1/3-stop clicks and a card prints the fraction, so a
+        // stored -0.33 has to come back as the -1/3 that was dialled in.
+        assert_eq!(thirds(-0.33), "-1/3");
+        assert_eq!(thirds(0.0), "0");
+        assert_eq!(thirds(1.0), "+1");
+        assert_eq!(thirds(-0.67), "-2/3");
+        assert_eq!(thirds(1.33), "+1 1/3");
+        assert_eq!(thirds(-2.0), "-2");
+    }
+
+    #[test]
+    fn a_film_name_unwraps_fujis_double_barrelled_form() {
+        assert_eq!(film_name("F0/Standard (Provia)"), "Provia/Standard");
+        assert_eq!(film_name("Nostalgic Neg"), "Nostalgic Neg");
+        // No slash means nothing to unwrap, even with a paren present.
+        assert_eq!(film_name("Acros (Red)"), "Acros (Red)");
+    }
+
+    #[test]
+    fn a_bw_sim_is_the_film_and_drops_the_colour_line() {
+        // Fuji leaves FilmMode blank for Acros/Monochrome and records the
+        // choice in Saturation, so it routes to Film Simulation instead.
+        assert!(is_bw(Some("Acros Green Filter")));
+        assert!(is_bw(Some("Monochrome")));
+        assert!(is_bw(Some("Sepia")));
+        assert!(!is_bw(Some("+3 (very high)")));
+        assert!(!is_bw(None));
     }
 
     #[test]

@@ -120,7 +120,7 @@ size and a supply chain. The release binary is about 420 KB.
 exif-sooc --recipe  photo.HIF        # the recipe card above
 exif-sooc --json    ~/Pictures/sooc  # one object per file, exiftool-shaped keys
 exif-sooc --tsv     ~/Pictures/sooc  # a row per file, for a spreadsheet
-exif-sooc --keyed   ~/Pictures/sooc  # one object keyed by filename stem
+exif-sooc --keyed   ~/Pictures/sooc  # one object keyed by filename stem, with recipe cards
 ```
 
 ### Keeping an index up to date
@@ -151,8 +151,33 @@ a first run rather than an error. Malformed input is refused outright, since
 half-reading an index and writing the result is how a good file becomes a bad
 one.
 
-`--keyed` and `--merge-into` are ADDITIVE. `-json` is untouched, which is what
-the 160-file ExifTool corpus diff actually tests.
+### The recipe card in `--keyed`
+
+Each Fujifilm frame carries a `recipe` object in the fujixweekly idiom: what the
+photographer SET, rather than what the sensor wrote. "Standard" is not a dynamic
+range, "Soft" is not a sharpness, and `Red +40, Blue -100` is not how anyone
+writes a WB shift.
+
+```json
+"recipe": {
+  "Film Simulation": "Nostalgic Neg",
+  "Dynamic Range": "DR400",
+  "Grain Effect": "Strong, Large",
+  "White Balance": "Kelvin (4500K), +2 Red & -5 Blue",
+  "Highlight": "-1",
+  "Exposure Compensation": "-1/3"
+}
+```
+
+Every value is a formatted string, including `"0"` and `"-1"`. Unquoting the
+ones that happen to parse as numbers would make the type depend on the sign.
+
+A line is omitted when the camera did not record it, and a non-Fuji frame gets
+no `recipe` key at all rather than an empty one.
+
+`--keyed` and `--merge-into` are ADDITIVE. `-json` and `--recipe` are byte-identical
+before and after they were added, which is what the 160-file ExifTool corpus diff
+actually tests.
 
 A directory is scanned one level deep for `.jpg`, `.jpeg`, `.heif`, `.heic`,
 `.hif` and `.raf`. Files are read in parallel.
