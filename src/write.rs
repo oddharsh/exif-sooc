@@ -183,26 +183,48 @@ pub fn rewrite(jpeg: &[u8], insert: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Where the image really ends: the first true marker after the scan starts.
+/// Where the image really ends: the EOI that closes the last scan.
 ///
-/// Inside entropy-coded data every literal 0xFF is stuffed as `FF 00`, and
-/// restart markers `FF D0`..`FF D7` are part of the stream, so anything else
-/// after an 0xFF is the marker that terminates the image. Searching for
-/// `FF D9` without that rule finds the EOI of an embedded preview instead: on
-/// a Leica JPEG the first one sits 11 KB in, with 10 MB of photograph after it.
+/// A BASELINE JPEG has one scan, so the first marker after SOS is the end. A
+/// PROGRESSIVE one has many, separated by DHT and further SOS segments, and
+/// stopping at the first marker truncates it to the first scan. That is not a
+/// degraded image, it is a broken file: a 27 KB thumbnail came out 4.5 KB
+/// ending on a DHT marker.
+///
+/// So this walks: inside entropy-coded data a literal 0xFF is stuffed as
+/// `FF 00` and restart markers `FF D0`..`FF D7` are part of the stream, while
+/// anything else is a real marker. EOI ends the image; any other marker starts
+/// a segment whose length is skipped before scanning resumes.
 fn scan_end(d: &[u8], scan_at: usize) -> usize {
-    let mut i = scan_at + 2;
-    while i + 1 < d.len() {
-        if d[i] == 0xFF {
-            let m = d[i + 1];
-            if m != 0x00 && !(0xD0..=0xD7).contains(&m) && m != 0xFF {
-                // Include the marker itself, which is EOI in a well-formed file.
-                return (i + 2).min(d.len());
-            }
+    let mut i = scan_at;
+    loop {
+        // Skip this segment's header (SOS and friends carry a length).
+        if i + 3 >= d.len() {
+            return d.len();
         }
-        i += 1;
+        let len = u16::from_be_bytes([d[i + 2], d[i + 3]]) as usize;
+        i += 2 + len.max(2);
+
+        // Then the entropy-coded data, up to the next real marker.
+        while i + 1 < d.len() {
+            if d[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let m = d[i + 1];
+            if m == 0x00 || m == 0xFF || (0xD0..=0xD7).contains(&m) {
+                i += 2;
+                continue;
+            }
+            if m == 0xD9 {
+                return (i + 2).min(d.len()); // EOI, inclusive
+            }
+            break; // another segment: DHT, SOS, DQT on the way to more scans
+        }
+        if i + 1 >= d.len() {
+            return d.len();
+        }
     }
-    d.len()
 }
 
 #[cfg(test)]
@@ -249,6 +271,47 @@ mod tests {
         // is the test.
         let out = rewrite(&sample(), &[]).unwrap();
         assert!(out.len() > 8);
+    }
+
+    /// A progressive JPEG: two scans separated by a DHT, then EOI. Stopping at
+    /// the first marker after the first scan cuts the image in half, which is
+    /// exactly what shipped and destroyed a corpus of thumbnails.
+    fn progressive() -> Vec<u8> {
+        let mut d = vec![0xFF, 0xD8];
+        d.extend_from_slice(&[0xFF, 0xE1, 0x00, 0x08]);
+        d.extend_from_slice(b"Exif\0\0");
+        d.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x04, 0x11, 0x22]); // SOF2
+        d.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x03, 0x00]); // first SOS
+        d.extend_from_slice(&[0x12, 0xFF, 0x00, 0x34]); // entropy, stuffed FF
+        d.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x04, 0xAA, 0xBB]); // DHT
+        d.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x03, 0x01]); // second SOS
+        d.extend_from_slice(&[0x56, 0xFF, 0x00, 0x78]); // more entropy
+        d.extend_from_slice(&[0xFF, 0xD9]);
+        d
+    }
+
+    #[test]
+    fn a_progressive_jpeg_keeps_every_scan() {
+        let full = progressive();
+        let out = rewrite(&full, &[]).unwrap();
+        assert!(out.ends_with(&[0xFF, 0xD9]), "ends at EOI");
+        // Both scans and the DHT between them survive.
+        assert_eq!(out.windows(2).filter(|w| *w == [0xFF, 0xDA]).count(), 2);
+        assert!(out.windows(2).any(|w| w == [0xFF, 0xC4]));
+        assert!(out.windows(4).any(|w| w == [0x56, 0xFF, 0x00, 0x78]));
+        assert!(
+            app1_segments(&out).unwrap().is_empty(),
+            "metadata still gone"
+        );
+    }
+
+    #[test]
+    fn a_trailer_after_a_progressive_image_is_still_dropped() {
+        let mut d = progressive();
+        d.extend_from_slice(b"TRAILING");
+        let out = rewrite(&d, &[]).unwrap();
+        assert!(out.ends_with(&[0xFF, 0xD9]));
+        assert!(!out.windows(8).any(|w| w == b"TRAILING"));
     }
 
     #[test]
