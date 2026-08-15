@@ -57,6 +57,10 @@ struct Sel {
 enum Mode {
     Json,
     Tsv,
+    /// Values only, one per line, no keys. ExifTool spells it -s3, and shell
+    /// scripts lean on it: `o=$(exiftool -s -s -s -n -Orientation "$f")` wants
+    /// a number on stdout, not an object to parse.
+    Bare,
     Recipe,
     /// The stem-keyed record shape aadhar.sh stores. Additive: `-json` stays
     /// byte-identical to ExifTool, which is what the corpus diff tests.
@@ -70,6 +74,7 @@ fn main() {
     let (mut quiet, mut groups, mut numeric_all, mut recurse) = (false, false, false, false);
     let mut merge_into: Option<PathBuf> = None;
     let mut want_merge_path = false;
+    let mut short_s = 0u8;
     let (mut strip, mut overwrite) = (false, false);
     let mut copy_from: Option<PathBuf> = None;
     let mut want_copy_path = false;
@@ -109,7 +114,17 @@ fn main() {
             // Accepted and ignored: ExifTool's short-name switches, which this
             // tool's output already satisfies since it never prints
             // descriptions.
-            "-s" | "-s2" | "-s3" | "-S" => {}
+            // ExifTool stacks -s: once shortens names, three times drops them
+            // entirely. Only the third form changes what a script sees, so it
+            // is the only one that changes anything here.
+            "-s3" => mode = Mode::Bare,
+            "-s" => {
+                short_s += 1;
+                if short_s >= 3 {
+                    mode = Mode::Bare;
+                }
+            }
+            "-s2" | "-S" => {}
             // These have to sit above the tag-selection arm below: `-all=` and
             // `-TagsFromFile` both start with a dash and a letter, which is
             // exactly how a tag is spelled, so a later arm never sees them.
@@ -263,6 +278,31 @@ fn main() {
                         .and_then(|r| r.film_simulation)
                         .unwrap_or_default(),
                 ));
+            }
+        }
+        Mode::Bare => {
+            // Values only, in the order the tags were asked for, one per line.
+            // A tag the file does not carry prints nothing rather than an empty
+            // line, so `[ -z "$o" ]` in a shell script means what it looks like.
+            for p in &ok {
+                if select.is_empty() {
+                    for t in &p.tags {
+                        out.push_str(&t.print);
+                        out.push('\n');
+                    }
+                } else {
+                    for sel in &select {
+                        if let Some(t) = p.tags.iter().find(|t| matches(t, sel)) {
+                            let v = if sel.numeric || numeric_all {
+                                t.value.to_display()
+                            } else {
+                                t.print.clone()
+                            };
+                            out.push_str(&v);
+                            out.push('\n');
+                        }
+                    }
+                }
             }
         }
         Mode::Recipe => {
