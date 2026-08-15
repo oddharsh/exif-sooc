@@ -132,15 +132,17 @@ fn record(p: &Photo) -> Vec<(&'static str, String)> {
 
     let out = vec![
         ("camera", lit(p.camera())),
-        // The TAG, not Photo::lens(), which filters an empty string away. jq's
-        // `//` replaces null alone and "" is truthy there, so a body reporting
-        // an empty LensModel (an adapted manual lens, no electronic contacts)
-        // stores "" rather than null. 11 of 158 frames here are that case.
-        // Whether "" or null is the better record is a real question and a
-        // SEPARATE one: null means the tooltip skips the line, "" means it
-        // renders an empty one. Changing it is a visible change to the site, so
-        // it is not smuggled in as a side effect of this port.
-        ("lens", lit(txt("LensModel"))),
+        // A body with no electronic contacts (an adapted manual lens) reports
+        // an EMPTY LensModel, and empty is not a lens name. It is recorded as
+        // null so the field means "not recorded" rather than "recorded as
+        // nothing", which is the same discipline the rest of this record keeps.
+        //
+        // It was "" until 2026-08-15, inherited from the jq filter this replaced:
+        // jq's `//` substitutes null alone and "" is truthy there, so an empty
+        // tag passed straight through. 11 of 158 frames were that case.
+        // Deliberately kept during the port so that change stayed a no-op, and
+        // changed here on its own.
+        ("lens", lit(txt("LensModel").filter(|v| !v.is_empty()))),
         ("aperture", lit(txt("FNumber").map(|v| format!("f/{v}")))),
         ("shutter", lit(txt("ExposureTime"))),
         ("iso", lit(txt("ISO"))),
@@ -767,6 +769,30 @@ mod tests {
         let b = out.find("brand_new").unwrap();
         assert!(z < c, "existing order must hold");
         assert!(c < b, "a genuinely new field lands after the existing ones");
+    }
+
+    #[test]
+    fn an_empty_tag_is_null_rather_than_an_empty_string() {
+        // `lit` keeps "" for a tag that genuinely holds one, because that is a
+        // real recorded value for most fields. `lens` is the exception and
+        // filters at the call site: an empty LensModel means no lens was
+        // reported, not that the lens is named "".
+        let keep = |s: Option<String>| match s {
+            Some(v) => format!("{v:?}"),
+            None => "null".to_string(),
+        };
+        assert_eq!(
+            keep(Some(String::new())),
+            "\"\"",
+            "lit itself does not filter"
+        );
+        assert_eq!(keep(Some("x".into())), "\"x\"");
+        // what the lens call site does with it
+        assert_eq!(keep(Some(String::new()).filter(|v| !v.is_empty())), "null");
+        assert_eq!(
+            keep(Some("Summilux".to_string()).filter(|v| !v.is_empty())),
+            "\"Summilux\""
+        );
     }
 
     #[test]
