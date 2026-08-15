@@ -78,7 +78,7 @@ fn collect(cmd: &str, args: &[&str], files: &[PathBuf]) -> BTreeMap<String, Valu
     out
 }
 
-fn scalar(v: &Value) -> String {
+pub fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),

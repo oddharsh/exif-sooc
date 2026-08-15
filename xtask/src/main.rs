@@ -8,9 +8,11 @@
 //!
 //!     cargo xtask fuji-tags <path/to/ExifTool/lib/Image/ExifTool/FujiFilm.pm>
 //!     cargo xtask compare <folder of photographs>
+//!     cargo xtask compare-pipeline <folder of photographs>
 
 mod compare;
 mod fuji;
+mod pipeline;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -19,10 +21,12 @@ fn main() {
     let code = match cmd.as_str() {
         "fuji-tags" => fuji::run(&rest),
         "compare" => compare::run(&rest),
+        "compare-pipeline" => pipeline::run(&rest),
         "-h" | "--help" | "" => {
             println!(
                 "cargo xtask fuji-tags <FujiFilm.pm>   regenerate src/fuji_tags.rs\n\
-                 cargo xtask compare <DIR>             diff every tag against exiftool"
+                 cargo xtask compare <DIR>             diff every tag against exiftool\n\
+                 cargo xtask compare-pipeline <DIR>    diff a real ExifTool command line"
             );
             0
         }

@@ -73,10 +73,11 @@ cargo build --release
 EXIF_SOOC_CORPUS=~/Pictures/sooc cargo test --release
 ```
 
-Or directly, which is the same comparison:
+Or directly, which is what the suite runs:
 
 ```sh
-cargo xtask compare ~/Pictures/sooc
+cargo xtask compare ~/Pictures/sooc           # every tag, one at a time
+cargo xtask compare-pipeline ~/Pictures/sooc  # one real ExifTool command line
 ```
 
 There are synthetic tests for the containers too, each pinning a way a file can
@@ -96,7 +97,7 @@ exif-sooc -json -q -Make -Model -FilmMode -FujiFilm:Sharpness -Orientation# ~/Pi
 
 That exact invocation, taken from a production photo pipeline with 36 selected
 tags, produces **byte-identical JSON to ExifTool across 160 files**, which
-`tools/compare-pipeline.sh` checks.
+`cargo xtask compare-pipeline` checks.
 
 | | |
 |---|---|
@@ -289,6 +290,20 @@ the wrong aspect ratio.
 
 For any of those, use [ExifTool](https://exiftool.org). It is the real thing
 and this is not trying to replace it.
+
+## Versions
+
+`--version` is what a caller should gate on, because the failure modes here are
+quiet. A build that predates a feature does not reject the flag: `-all=` reads
+as a tag SELECTION and prints JSON, so a strip silently does nothing.
+
+| version | what a caller can rely on |
+|---|---|
+| **0.2.0** | writing (`-all=`, `-TagsFromFile`, `-Orientation#=`), bare `-s3` output, and progressive JPEGs surviving a strip |
+| 0.1.0 | reading only |
+
+0.1.0 shipped a strip that truncated progressive JPEGs at their first scan.
+Every JPEG this project's pipeline produces is progressive, so pin 0.2.0.
 
 ## Credit
 

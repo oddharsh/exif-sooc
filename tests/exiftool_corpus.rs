@@ -4,9 +4,14 @@
 //! right, which is the only claim that matters and the reason this tool can be
 //! small: it never has to guess whether a value is correct.
 //!
-//! The comparison itself lives in `cargo xtask compare`, so it can be run by
-//! hand as easily as by the suite. Opt in by pointing it at your own photos,
-//! since none ship with the crate:
+//! Two claims, so two tests. `compare` checks every tag this reads, one
+//! group-qualified tag at a time. `compare-pipeline` checks a whole ExifTool
+//! command line, the 36 selected tags a production pipeline actually asks for,
+//! which is the drop-in claim the README makes.
+//!
+//! Both comparisons live in xtask, so they can be run by hand as easily as by
+//! the suite. Opt in by pointing them at your own photos, since none ship with
+//! the crate:
 //!
 //!     cargo build --release
 //!     EXIF_SOOC_CORPUS=~/Pictures/sooc cargo test --release -- --nocapture
@@ -14,8 +19,8 @@
 use std::path::Path;
 use std::process::Command;
 
-#[test]
-fn agrees_with_exiftool() {
+/// Run one xtask comparison, or explain why it was skipped.
+fn compare(subcommand: &str) {
     let Ok(dir) = std::env::var("EXIF_SOOC_CORPUS") else {
         eprintln!("EXIF_SOOC_CORPUS not set, skipping");
         return;
@@ -33,7 +38,7 @@ fn agrees_with_exiftool() {
     }
 
     let out = Command::new(&xtask)
-        .args(["compare", &dir])
+        .args([subcommand, &dir])
         .env("EXIF_SOOC", env!("CARGO_BIN_EXE_exif-sooc"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -42,7 +47,18 @@ fn agrees_with_exiftool() {
     eprintln!("{report}");
     assert!(
         out.status.success(),
-        "exif-sooc disagreed with exiftool:\n{report}{}",
+        "exif-sooc disagreed with exiftool ({subcommand}):\n{report}{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn agrees_with_exiftool() {
+    compare("compare");
+}
+
+/// The drop-in claim: one real ExifTool argument list, the same JSON out.
+#[test]
+fn agrees_through_a_real_command_line() {
+    compare("compare-pipeline");
 }
