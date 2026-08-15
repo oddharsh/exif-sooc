@@ -99,6 +99,64 @@ pub fn app1_from_tiff(tiff: &[u8]) -> Result<Vec<u8>, String> {
     Ok(seg)
 }
 
+/// Overwrite EXIF Orientation inside an APP1 segment.
+///
+/// The one tag worth being able to set. When metadata is copied onto an export
+/// whose rotation is already baked into its pixels, carrying the source's
+/// Orientation across tells every viewer that honours EXIF to turn the frame a
+/// second time, and a portrait lands on its side.
+///
+/// Orientation is a SHORT stored inline in its directory entry, so this
+/// overwrites two bytes and touches nothing else. A file that has no
+/// Orientation entry is left alone rather than grown: inserting an entry means
+/// rewriting every offset in the directory, which is a different and much
+/// riskier operation than this needs.
+pub fn set_orientation(app1: &[u8], value: u16) -> Result<Vec<u8>, String> {
+    if app1.len() < 20 || app1[0] != 0xFF || app1[1] != 0xE1 || &app1[4..10] != b"Exif\0\0" {
+        return Err("not an APP1 EXIF segment".into());
+    }
+    let tiff_at = 10;
+    let t = &app1[tiff_at..];
+    let le = match t.get(0..4) {
+        Some([0x49, 0x49, 0x2A, 0x00]) => true,
+        Some([0x4D, 0x4D, 0x00, 0x2A]) => false,
+        _ => return Err("no TIFF header".into()),
+    };
+    let rd32 = |b: &[u8]| {
+        if le {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        }
+    };
+    let rd16 = |b: &[u8]| {
+        if le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        }
+    };
+    let ifd0 = rd32(t.get(4..8).ok_or("truncated header")?) as usize;
+    let n = rd16(t.get(ifd0..ifd0 + 2).ok_or("truncated IFD")?) as usize;
+
+    let mut out = app1.to_vec();
+    for i in 0..n {
+        let e = ifd0 + 2 + i * 12;
+        let tag = rd16(t.get(e..e + 2).ok_or("truncated entry")?);
+        if tag == 0x0112 {
+            let at = tiff_at + e + 8;
+            let bytes = if le {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            };
+            out[at..at + 2].copy_from_slice(&bytes);
+            return Ok(out);
+        }
+    }
+    Ok(out)
+}
+
 /// Rebuild the JPEG without metadata, optionally inserting segments after SOI.
 pub fn rewrite(jpeg: &[u8], insert: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     let mut kept: Vec<(usize, usize)> = Vec::new();
@@ -216,6 +274,32 @@ mod tests {
         assert_eq!(&seg[..2], &[0xFF, 0xE1]);
         assert_eq!(u16::from_be_bytes([seg[2], seg[3]]) as usize, seg.len() - 2);
         assert_eq!(&seg[4..10], b"Exif\0\0");
+    }
+
+    #[test]
+    fn orientation_can_be_forced_to_upright() {
+        // A minimal APP1 with one IFD0 entry: Orientation = 8.
+        let mut tiff = vec![0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0];
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+        tiff.extend_from_slice(&3u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        let seg = app1_from_tiff(&tiff).unwrap();
+        let out = set_orientation(&seg, 1).unwrap();
+        // The value sits inline in the entry, so only those bytes move.
+        assert_eq!(out.len(), seg.len());
+        assert_ne!(out, seg);
+        let at = 10 + 8 + 2 + 8;
+        assert_eq!(u16::from_le_bytes([out[at], out[at + 1]]), 1);
+    }
+
+    #[test]
+    fn a_segment_without_orientation_is_left_alone() {
+        let tiff = vec![0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let seg = app1_from_tiff(&tiff).unwrap();
+        assert_eq!(set_orientation(&seg, 1).unwrap(), seg);
     }
 
     #[test]

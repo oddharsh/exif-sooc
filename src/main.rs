@@ -76,6 +76,7 @@ fn main() {
     let mut want_merge_path = false;
     let mut short_s = 0u8;
     let (mut strip, mut overwrite) = (false, false);
+    let mut force_orientation: Option<u16> = None;
     let mut copy_from: Option<PathBuf> = None;
     let mut want_copy_path = false;
 
@@ -134,6 +135,18 @@ fn main() {
             // everything case is supported, so it is accepted and implied.
             "-all:all" => {}
             "-TagsFromFile" | "--copy-from" => want_copy_path = true,
+            // ExifTool's spelling for forcing a tag. Only Orientation is
+            // supported, because it is the only one an export needs: the
+            // rotation is already in the pixels, so the tag must say upright.
+            s if s.starts_with("-Orientation#=") || s.starts_with("-Orientation=") => {
+                match s.rsplit('=').next().and_then(|v| v.parse::<u16>().ok()) {
+                    Some(v) => force_orientation = Some(v),
+                    None => {
+                        eprintln!("exif-sooc: {s} needs a number");
+                        std::process::exit(2);
+                    }
+                }
+            }
             s if s.starts_with("--") => {
                 eprintln!("exif-sooc: unknown option {s}");
                 std::process::exit(2);
@@ -187,7 +200,13 @@ fn main() {
     }
 
     if strip || copy_from.is_some() {
-        std::process::exit(run_write(&files, copy_from.as_deref(), overwrite, quiet));
+        std::process::exit(run_write(
+            &files,
+            copy_from.as_deref(),
+            overwrite,
+            quiet,
+            force_orientation,
+        ));
     }
 
     let threads = std::thread::available_parallelism()
@@ -425,7 +444,13 @@ fn emit_recipe(p: &Photo, out: &mut String) {
 /// Both edits rebuild the JPEG around its scan without decoding it, so the
 /// pixels come out byte-identical. Anything that is not a JPEG is refused
 /// rather than rewritten, since segment surgery has no meaning elsewhere.
-fn run_write(files: &[PathBuf], from: Option<&Path>, overwrite: bool, quiet: bool) -> i32 {
+fn run_write(
+    files: &[PathBuf],
+    from: Option<&Path>,
+    overwrite: bool,
+    quiet: bool,
+    force_orientation: Option<u16>,
+) -> i32 {
     // The source is read once, whatever container it arrives in.
     let insert: Vec<Vec<u8>> = match from {
         None => Vec::new(),
@@ -463,6 +488,13 @@ fn run_write(files: &[PathBuf], from: Option<&Path>, overwrite: bool, quiet: boo
                         return 1;
                     }
                 }
+            };
+            let segs = match force_orientation {
+                None => segs,
+                Some(v) => segs
+                    .into_iter()
+                    .map(|seg| write::set_orientation(&seg, v).unwrap_or(seg))
+                    .collect(),
             };
             if segs.is_empty() && !quiet {
                 eprintln!("exif-sooc: {} carries no metadata to copy", src.display());
