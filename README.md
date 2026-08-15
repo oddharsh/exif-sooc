@@ -104,6 +104,40 @@ tags, produces **byte-identical JSON to ExifTool across 160 files**, which
 Tags this does not know are absent rather than guessed at, which is the same
 result as ExifTool's default of hiding unknown tags.
 
+## Writing
+
+Two operations, both segment surgery rather than tag editing. Neither one
+parses or rebuilds a single EXIF tag, so neither can corrupt one, and the
+entropy-coded scan is copied across untouched, so the pixels are the same bytes
+afterwards.
+
+```sh
+exif-sooc -all= -overwrite_original out.jpg              # remove all metadata
+exif-sooc -TagsFromFile src.HIF -all:all out.jpg         # copy metadata across
+```
+
+`-all=` is **byte-identical to ExifTool's**, verified on a 22 MB JPEG. It drops
+every APPn segment (JFIF, EXIF, XMP, ICC, IPTC) and COM, which is what ExifTool
+does, measured rather than assumed.
+
+`-TagsFromFile` differs from ExifTool deliberately, and the difference is worth
+knowing. ExifTool REBUILDS the metadata; this copies the source's APP1 segments
+verbatim. On one Fujifilm frame that means 165 tags where ExifTool's rewrite
+keeps 163, since a verbatim copy also carries the tags it has no table for
+(`CompressedBitsPerPixel`, `InteropIndex`, `InteropVersion` were the three), and
+it costs about 63 KB of the source's original padding. Same embedded thumbnail
+either way. More faithful, larger; for an archive copy that trade is the right
+way round.
+
+The source does not have to be a JPEG. A HEIF keeps its EXIF as an item rather
+than a segment, so there is nothing to copy across and the APP1 envelope is
+built around the extracted TIFF block. Copying a `.HIF`'s metadata onto an
+encoded JPEG works and keeps the Fujifilm recipe.
+
+Without `-overwrite_original` a `_original` backup is left beside each file, as
+ExifTool does. A tool that edits photographs in place by default is one bad flag
+away from an unrecoverable afternoon.
+
 ## Install
 
 ```sh

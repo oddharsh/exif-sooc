@@ -5,7 +5,7 @@
 //! selection, `-Group:Tag`, the `#` numeric suffix and `-json` all mean what
 //! they mean there.
 
-use exif_sooc::{json, read, site, Group, Photo};
+use exif_sooc::{json, read, site, write, Group, Photo};
 use std::path::{Path, PathBuf};
 
 const USAGE: &str = "\
@@ -21,6 +21,11 @@ TAG SELECTION (as in ExifTool)
     -Make -Model          only these tags, keys unqualified
     -FujiFilm:Sharpness   disambiguate by group when two tags share a name
     -Orientation#         the raw value rather than the readable one
+
+WRITING (segments only; the scan is never touched)
+    -all=                 remove every metadata segment
+    -TagsFromFile <SRC>   copy SRC's metadata onto the given files
+    -overwrite_original   write in place instead of leaving a _original backup
 
 OPTIONS
     -json, -j     JSON, one object per file (the default)
@@ -65,11 +70,19 @@ fn main() {
     let (mut quiet, mut groups, mut numeric_all, mut recurse) = (false, false, false, false);
     let mut merge_into: Option<PathBuf> = None;
     let mut want_merge_path = false;
+    let (mut strip, mut overwrite) = (false, false);
+    let mut copy_from: Option<PathBuf> = None;
+    let mut want_copy_path = false;
 
     for a in std::env::args().skip(1) {
         if want_merge_path {
             merge_into = Some(PathBuf::from(&a));
             want_merge_path = false;
+            continue;
+        }
+        if want_copy_path {
+            copy_from = Some(PathBuf::from(&a));
+            want_copy_path = false;
             continue;
         }
         match a.as_str() {
@@ -97,6 +110,15 @@ fn main() {
             // tool's output already satisfies since it never prints
             // descriptions.
             "-s" | "-s2" | "-s3" | "-S" => {}
+            // These have to sit above the tag-selection arm below: `-all=` and
+            // `-TagsFromFile` both start with a dash and a letter, which is
+            // exactly how a tag is spelled, so a later arm never sees them.
+            "-all=" | "--strip" => strip = true,
+            "-overwrite_original" => overwrite = true,
+            // The tag spec ExifTool wants alongside -TagsFromFile. Only the
+            // everything case is supported, so it is accepted and implied.
+            "-all:all" => {}
+            "-TagsFromFile" | "--copy-from" => want_copy_path = true,
             s if s.starts_with("--") => {
                 eprintln!("exif-sooc: unknown option {s}");
                 std::process::exit(2);
@@ -132,6 +154,10 @@ fn main() {
         eprintln!("exif-sooc: --merge-into needs a file path");
         std::process::exit(2);
     }
+    if want_copy_path {
+        eprintln!("exif-sooc: -TagsFromFile needs a source file");
+        std::process::exit(2);
+    }
     if paths.is_empty() {
         print!("{USAGE}");
         std::process::exit(2);
@@ -143,6 +169,10 @@ fn main() {
             eprintln!("exif-sooc: no readable image files");
         }
         std::process::exit(1);
+    }
+
+    if strip || copy_from.is_some() {
+        std::process::exit(run_write(&files, copy_from.as_deref(), overwrite, quiet));
     }
 
     let threads = std::thread::available_parallelism()
@@ -348,6 +378,104 @@ fn emit_recipe(p: &Photo, out: &mut String) {
         None => out.push_str("  (no Fujifilm recipe)\n"),
     }
     out.push('\n');
+}
+
+/// Strip metadata segments, or copy them from another file.
+///
+/// Both edits rebuild the JPEG around its scan without decoding it, so the
+/// pixels come out byte-identical. Anything that is not a JPEG is refused
+/// rather than rewritten, since segment surgery has no meaning elsewhere.
+fn run_write(files: &[PathBuf], from: Option<&Path>, overwrite: bool, quiet: bool) -> i32 {
+    // The source is read once, whatever container it arrives in.
+    let insert: Vec<Vec<u8>> = match from {
+        None => Vec::new(),
+        Some(src) => {
+            let bytes = match std::fs::read(src) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("exif-sooc: {}: {e}", src.display());
+                    return 1;
+                }
+            };
+            // A JPEG source hands over its segments verbatim, which carries
+            // XMP and anything else this crate has no table for. Any other
+            // container has its EXIF wrapped into a fresh segment.
+            let segs = if bytes.starts_with(&[0xFF, 0xD8]) {
+                match write::app1_segments(&bytes) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("exif-sooc: {}: {e}", src.display());
+                        return 1;
+                    }
+                }
+            } else {
+                let tiff = match exif_sooc::exif_tiff(src) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("exif-sooc: {}: {e}", src.display());
+                        return 1;
+                    }
+                };
+                match write::app1_from_tiff(&tiff) {
+                    Ok(seg) => vec![seg],
+                    Err(e) => {
+                        eprintln!("exif-sooc: {}: {e}", src.display());
+                        return 1;
+                    }
+                }
+            };
+            if segs.is_empty() && !quiet {
+                eprintln!("exif-sooc: {} carries no metadata to copy", src.display());
+            }
+            segs
+        }
+    };
+
+    let mut failed = 0;
+    for path in files {
+        let name = path.display();
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                failed += 1;
+                eprintln!("{name}: {e}");
+                continue;
+            }
+        };
+        let out = match write::rewrite(&bytes, &insert) {
+            Ok(o) => o,
+            Err(e) => {
+                failed += 1;
+                if !quiet {
+                    eprintln!("{name}: {e}");
+                }
+                continue;
+            }
+        };
+        // ExifTool keeps a _original copy unless told not to, and a tool that
+        // edits photographs in place by default is one bad flag away from an
+        // unrecoverable afternoon.
+        if !overwrite {
+            let backup = path.with_file_name(format!(
+                "{}_original",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if let Err(e) = std::fs::write(&backup, &bytes) {
+                failed += 1;
+                eprintln!("{name}: could not write the backup: {e}");
+                continue;
+            }
+        }
+        if let Err(e) = std::fs::write(path, &out) {
+            failed += 1;
+            eprintln!("{name}: {e}");
+        }
+    }
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 const EXTS: [&str; 9] = [

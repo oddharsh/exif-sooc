@@ -26,6 +26,7 @@ pub mod site;
 pub mod tags;
 mod tiff;
 pub mod value;
+pub mod write;
 
 use std::path::{Path, PathBuf};
 
@@ -135,6 +136,29 @@ impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)
     }
+}
+
+/// The raw TIFF block holding a file's EXIF, whatever container it came in.
+///
+/// Exposed because copying metadata between files needs the bytes rather than
+/// the parsed tags: a HEIF keeps its EXIF as an item and a JPEG keeps it in a
+/// segment, and re-serialising parsed tags would lose everything this crate
+/// does not have a table for.
+pub fn exif_tiff(path: impl AsRef<Path>) -> Result<Vec<u8>, Error> {
+    let path = path.as_ref();
+    let mut src = read::Source::open(path)?;
+    let format = sniff(src.front()).ok_or(Error::Unsupported)?;
+    let (tiff, _) = match format {
+        Format::Jpeg => jpeg::exif(&mut src).ok_or(Error::NoExif)?,
+        Format::Heif => bmff::exif(&mut src).ok_or(Error::NoExif)?,
+        Format::Raf => {
+            let (mut inner, base) = raf::jpeg(&mut src).ok_or(Error::NoExif)?;
+            let (t, off) = jpeg::exif(&mut inner).ok_or(Error::NoExif)?;
+            (t, base + off)
+        }
+        Format::Dng => (src.front().to_vec(), 0),
+    };
+    Ok(tiff)
 }
 
 /// Read one file.
