@@ -116,9 +116,35 @@ pub fn rewrite(jpeg: &[u8], insert: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     for (a, b) in kept {
         out.extend_from_slice(&jpeg[a..b]);
     }
-    // The scan and everything after it, verbatim.
-    out.extend_from_slice(&jpeg[scan_at..]);
+    // The scan, up to and including EOI. Anything past that is a TRAILER:
+    // some cameras append a second image or a preview there, and ExifTool
+    // treats it as metadata and drops it. Leaving it behind means `-all=`
+    // returning a file that still carries 98 KB of payload on a Leica.
+    let end = scan_end(jpeg, scan_at);
+    out.extend_from_slice(&jpeg[scan_at..end]);
     Ok(out)
+}
+
+/// Where the image really ends: the first true marker after the scan starts.
+///
+/// Inside entropy-coded data every literal 0xFF is stuffed as `FF 00`, and
+/// restart markers `FF D0`..`FF D7` are part of the stream, so anything else
+/// after an 0xFF is the marker that terminates the image. Searching for
+/// `FF D9` without that rule finds the EOI of an embedded preview instead: on
+/// a Leica JPEG the first one sits 11 KB in, with 10 MB of photograph after it.
+fn scan_end(d: &[u8], scan_at: usize) -> usize {
+    let mut i = scan_at + 2;
+    while i + 1 < d.len() {
+        if d[i] == 0xFF {
+            let m = d[i + 1];
+            if m != 0x00 && !(0xD0..=0xD7).contains(&m) && m != 0xFF {
+                // Include the marker itself, which is EOI in a well-formed file.
+                return (i + 2).min(d.len());
+            }
+        }
+        i += 1;
+    }
+    d.len()
 }
 
 #[cfg(test)]
@@ -165,6 +191,23 @@ mod tests {
         // is the test.
         let out = rewrite(&sample(), &[]).unwrap();
         assert!(out.len() > 8);
+    }
+
+    #[test]
+    fn a_trailer_after_eoi_is_dropped() {
+        let mut d = sample();
+        d.extend_from_slice(b"TRAILING PAYLOAD");
+        let out = rewrite(&d, &[]).unwrap();
+        assert!(out.ends_with(&[0xFF, 0xD9]), "the file ends at EOI");
+        assert!(!out.windows(8).any(|w| w == b"TRAILING"));
+    }
+
+    #[test]
+    fn a_stuffed_ff_in_the_scan_is_not_the_end() {
+        // FF 00 is a literal 0xFF in the entropy stream. Treating it as a
+        // marker truncates the photograph.
+        let out = rewrite(&sample(), &[]).unwrap();
+        assert!(out.ends_with(&[0x12, 0xFF, 0x00, 0x34, 0xFF, 0xD9]));
     }
 
     #[test]

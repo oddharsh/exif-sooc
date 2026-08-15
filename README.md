@@ -116,9 +116,31 @@ exif-sooc -all= -overwrite_original out.jpg              # remove all metadata
 exif-sooc -TagsFromFile src.HIF -all:all out.jpg         # copy metadata across
 ```
 
-`-all=` is **byte-identical to ExifTool's**, verified on a 22 MB JPEG. It drops
-every APPn segment (JFIF, EXIF, XMP, ICC, IPTC) and COM, which is what ExifTool
-does, measured rather than assumed.
+`-all=` is **byte-identical to ExifTool's on all 20 files** of a mixed Fujifilm
+and Leica test set, 452 MB of JPEG. It drops every APPn segment (JFIF, EXIF,
+XMP, ICC, IPTC), COM, and any trailer after EOI, which is what ExifTool does,
+measured rather than assumed.
+
+That trailer matters more than it sounds. Some cameras append a preview or a
+second image after the image ends, and a Leica M here carried 669 KB of it.
+Finding the real end means honouring the entropy stream's rules: a literal 0xFF
+is stuffed as `FF 00` and restart markers are part of the data, so a plain
+search for `FF D9` lands on an embedded preview's EOI 11 KB in, with 10 MB of
+photograph still to come.
+
+Speed, on those 20 files, best of three:
+
+| | per process, per file | one process for all 20 |
+|---|--:|--:|
+| **exif-sooc `-all=`** | **25.5 ms** | **20.2 ms** |
+| exiftool `-all=` | 135.7 ms | 43.2 ms |
+| **exif-sooc `-TagsFromFile`** | **25.6 ms** | |
+| exiftool `-TagsFromFile` | 282.4 ms | |
+
+The per-process column is the one that matters for a shell pipeline calling it
+once per photo: 5.3x on the strip and **11x on the copy**. Copying is where the
+gap widens, because ExifTool rebuilds the metadata while this moves the segments
+across, and neither one has to touch the scan.
 
 `-TagsFromFile` differs from ExifTool deliberately, and the difference is worth
 knowing. ExifTool REBUILDS the metadata; this copies the source's APP1 segments
