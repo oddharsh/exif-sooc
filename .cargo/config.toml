@@ -1,0 +1,4 @@
+[alias]
+# `cargo xtask <cmd>` — the project's own tools, kept in Rust so there is one
+# language in the tree.
+xtask = "run --release --package xtask --"

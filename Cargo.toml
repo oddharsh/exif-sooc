@@ -1,3 +1,11 @@
+[workspace]
+members = [".", "xtask"]
+
+# The library and binary stay dependency-free. `xtask` is where the tools that
+# need help live: parsing Perl wants a regex engine, and comparing against
+# ExifTool wants a JSON reader, and neither belongs in what a consumer installs.
+# Nothing under xtask/ ships.
+
 [package]
 name = "exif-sooc"
 version = "0.1.0"

@@ -16,6 +16,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
+      # The xtask binary is what the corpus test shells out to, and building
+      # the workspace is what makes it exist.
+      - run: cargo build --release --workspace
       - run: cargo test --release
       # The synthetic tests run everywhere. Agreement with ExifTool needs
       # photographs, which do not ship with the crate, so that suite is opt-in
@@ -29,4 +32,4 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --workspace -- -D warnings

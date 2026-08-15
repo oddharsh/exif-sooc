@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Dependencies live here rather than in the crate. A consumer of exif-sooc
+# installs none of this.
+[dependencies]
+regex = "1"
+serde_json = "1"

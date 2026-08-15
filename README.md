@@ -69,7 +69,14 @@ this does not are out of scope. It was never trying to be ExifTool.
 Point the suite at your own photos:
 
 ```sh
+cargo build --release
 EXIF_SOOC_CORPUS=~/Pictures/sooc cargo test --release
+```
+
+Or directly, which is the same comparison:
+
+```sh
+cargo xtask compare ~/Pictures/sooc
 ```
 
 There are synthetic tests for the containers too, each pinning a way a file can
