@@ -6,11 +6,17 @@
 //! `-json` all have to mean what they mean in ExifTool, and a difference in any
 //! of them shows up here.
 //!
-//! The argument list is not a sample. It is the invocation from aadhar.sh's
-//! www/scripts/extract-photo-metadata.sh, 36 selected tags, which is the
-//! pipeline this tool has to slot into. The directory is handed to both
-//! programs whole, so which files each one decides to read is part of what is
-//! being compared.
+//! The argument list is a real one: 36 selected tags, from aadhar.sh's photo
+//! pipeline, which called ExifTool exactly this way until exif-sooc took that
+//! path over with `--keyed` on 2026-08-14. So it now pins a command line no
+//! caller here still runs, and it stays pinned anyway. The drop-in claim is
+//! made in the README to everyone who installs this rather than to one caller,
+//! and this is the only check that exercises tag selection at all. Repointing
+//! it at whatever that caller runs today would retire the claim instead of
+//! testing it.
+//!
+//! The directory is handed to both programs whole, so which files each one
+//! decides to read is part of what is being compared.
 //!
 //! This direction is stricter than `compare`, on purpose. There, a tag ExifTool
 //! reports and this does not is out of scope. Here, asking for 36 tags and
