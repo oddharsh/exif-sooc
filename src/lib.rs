@@ -161,6 +161,19 @@ pub fn exif_tiff(path: impl AsRef<Path>) -> Result<Vec<u8>, Error> {
     Ok(tiff)
 }
 
+/// The XMP packet of a HEIF, verbatim, or `None` when it carries none.
+///
+/// HEIF only, because that is the one container whose XMP cannot travel as a
+/// segment: a JPEG source's APP1 segments are copied whole, XMP included, and
+/// nothing here reads XMP out of a RAF's embedded preview.
+pub fn heif_xmp(path: impl AsRef<Path>) -> Result<Option<Vec<u8>>, Error> {
+    let mut src = read::Source::open(path.as_ref())?;
+    match sniff(src.front()).ok_or(Error::Unsupported)? {
+        Format::Heif => Ok(bmff::xmp(&mut src)),
+        _ => Ok(None),
+    }
+}
+
 /// Read one file.
 pub fn read(path: impl AsRef<Path>) -> Result<Photo, Error> {
     let path = path.as_ref();

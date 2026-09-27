@@ -164,6 +164,15 @@ than a segment, so there is nothing to copy across and the APP1 envelope is
 built around the extracted TIFF block. Copying a `.HIF`'s metadata onto an
 encoded JPEG works and keeps the Fujifilm recipe.
 
+Its XMP is a second item (type `mime`, content type `application/rdf+xml`), and
+it gets a second APP1 after the EXIF, the order ExifTool writes. Before 0.3.0 it
+was dropped. On a Fujifilm body the packet holds one property, `xmp:Rating`, and
+it is the only place an in-camera star rating is recorded: the EXIF has no
+Rating tag. The packet is copied verbatim, so it keeps the camera's 12 KB of
+writable padding where ExifTool would re-pad to 2 KB. A deflate-encoded packet
+is skipped rather than copied, and one too large for a single segment is
+refused, since this does not write Extended XMP.
+
 Without `-overwrite_original` a `_original` backup is left beside each file, as
 ExifTool does. A tool that edits photographs in place by default is one bad flag
 away from an unrecoverable afternoon.
@@ -299,7 +308,8 @@ as a tag SELECTION and prints JSON, so a strip silently does nothing.
 
 | version | what a caller can rely on |
 |---|---|
-| **0.2.0** | writing (`-all=`, `-TagsFromFile`, `-Orientation#=`), bare `-s3` output, and progressive JPEGs surviving a strip |
+| **0.3.0** | `-TagsFromFile` from a HEIF carries its XMP as well as its EXIF |
+| 0.2.0 | writing (`-all=`, `-TagsFromFile`, `-Orientation#=`), bare `-s3` output, and progressive JPEGs surviving a strip |
 | 0.1.0 | reading only |
 
 0.1.0 shipped a strip that truncated progressive JPEGs at their first scan.

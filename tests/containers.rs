@@ -126,6 +126,164 @@ fn heif_exif_is_read() {
     assert_eq!(photo.camera().as_deref(), Some("FUJIFILM X-T50"));
 }
 
+/// A HEIF carrying EXIF (item 768) and, optionally, a `mime` item (769) whose
+/// payload is `xmp` split across `splits` extents, the shape a Fujifilm HIF
+/// has. `mime_tail` is what follows the item type: name, content type and
+/// content encoding, NUL-terminated.
+fn heif_with_xmp(xmp: &[u8], splits: usize, mime_tail: &[u8]) -> Vec<u8> {
+    let boxed = |kind: &[u8; 4], body: &[u8]| {
+        let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(body);
+        b
+    };
+    let infe = |id: u16, kind: &[u8; 4], tail: &[u8]| {
+        let mut e = vec![2u8, 0, 0, 0];
+        e.extend_from_slice(&id.to_be_bytes());
+        e.extend_from_slice(&0u16.to_be_bytes());
+        e.extend_from_slice(kind);
+        e.extend_from_slice(tail);
+        boxed(b"infe", &e)
+    };
+    let mut iinf = vec![0u8, 0, 0, 0];
+    iinf.extend_from_slice(&2u16.to_be_bytes());
+    iinf.extend_from_slice(&infe(768, b"Exif", b"\0"));
+    iinf.extend_from_slice(&infe(769, b"mime", mime_tail));
+    let iinf = boxed(b"iinf", &iinf);
+
+    let mut exif = 6u32.to_be_bytes().to_vec();
+    exif.extend_from_slice(b"Exif\0\0");
+    exif.extend_from_slice(&tiff());
+    let chunk = xmp.len().div_ceil(splits);
+    let parts: Vec<&[u8]> = xmp.chunks(chunk).collect();
+
+    // iloc v1, 4-byte offsets and lengths. Offsets are relative to the file,
+    // so they are patched once the meta box's size is known.
+    let iloc_len = 8 + 4 + 2 + 2 + (2 + 2 + 2 + 2 + 8) + (2 + 2 + 2 + 2 + 8 * parts.len());
+    let meta_len = 8 + 4 + iinf.len() + iloc_len;
+    let mut ftyp = b"heix".to_vec();
+    ftyp.extend_from_slice(&0u32.to_be_bytes());
+    ftyp.extend_from_slice(b"mif1heix");
+    let ftyp = boxed(b"ftyp", &ftyp);
+    let data_at = (ftyp.len() + meta_len) as u32;
+
+    let mut iloc = vec![1u8, 0, 0, 0];
+    iloc.extend_from_slice(&0x4400u16.to_be_bytes());
+    iloc.extend_from_slice(&2u16.to_be_bytes());
+    let item = |iloc: &mut Vec<u8>, id: u16, spans: &[(u32, u32)]| {
+        iloc.extend_from_slice(&id.to_be_bytes());
+        iloc.extend_from_slice(&0u16.to_be_bytes()); // construction method 0
+        iloc.extend_from_slice(&0u16.to_be_bytes()); // data reference
+        iloc.extend_from_slice(&(spans.len() as u16).to_be_bytes());
+        for (o, l) in spans {
+            iloc.extend_from_slice(&o.to_be_bytes());
+            iloc.extend_from_slice(&l.to_be_bytes());
+        }
+    };
+    item(&mut iloc, 768, &[(data_at, exif.len() as u32)]);
+    // Lay the extents out in REVERSE file order, so a reader that sorts by
+    // offset, or reads one span past the other, assembles the wrong packet.
+    let mut spans = Vec::new();
+    let mut at = data_at + exif.len() as u32 + xmp.len() as u32;
+    for p in &parts {
+        at -= p.len() as u32;
+        spans.push((at, p.len() as u32));
+    }
+    item(&mut iloc, 769, &spans);
+    let iloc = boxed(b"iloc", &iloc);
+    assert_eq!(iloc.len(), iloc_len);
+
+    let mut meta = vec![0u8, 0, 0, 0];
+    meta.extend_from_slice(&iinf);
+    meta.extend_from_slice(&iloc);
+    let meta = boxed(b"meta", &meta);
+    assert_eq!(meta.len(), meta_len);
+
+    let mut file = ftyp;
+    file.extend_from_slice(&meta);
+    file.extend_from_slice(&exif);
+    for p in parts.iter().rev() {
+        file.extend_from_slice(p);
+    }
+    file
+}
+
+const FUJI_XMP: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"><xmp:Rating>3</xmp:Rating></rdf:Description></rdf:RDF></x:xmpmeta>";
+const RDF: &[u8] = b"\0application/rdf+xml\0";
+
+#[test]
+fn heif_xmp_is_read_verbatim() {
+    let p = write("x1.hif", &heif_with_xmp(FUJI_XMP, 1, RDF));
+    assert_eq!(exif_sooc::heif_xmp(&p).unwrap().as_deref(), Some(FUJI_XMP));
+    // Reading the XMP item must not disturb finding the EXIF item beside it.
+    let photo = exif_sooc::read(&p).unwrap();
+    assert_eq!(photo.camera().as_deref(), Some("FUJIFILM X-T50"));
+}
+
+#[test]
+fn a_split_xmp_item_is_joined_in_extent_order() {
+    let p = write("x3.hif", &heif_with_xmp(FUJI_XMP, 3, RDF));
+    assert_eq!(exif_sooc::heif_xmp(&p).unwrap().as_deref(), Some(FUJI_XMP));
+}
+
+#[test]
+fn a_mime_item_that_is_not_xmp_or_is_encoded_is_not_xmp() {
+    // Another content type, then XMP that is deflated rather than a packet.
+    // A writer may also omit content_encoding entirely, which is the shape
+    // heif_xmp_is_read_verbatim already covers.
+    let other = write(
+        "x-other.hif",
+        &heif_with_xmp(FUJI_XMP, 1, b"\0text/plain\0"),
+    );
+    assert_eq!(exif_sooc::heif_xmp(&other).unwrap(), None);
+    let deflated = write(
+        "x-deflate.hif",
+        &heif_with_xmp(FUJI_XMP, 1, b"\0application/rdf+xml\0deflate\0"),
+    );
+    assert_eq!(exif_sooc::heif_xmp(&deflated).unwrap(), None);
+}
+
+/// Every APP1 in a JPEG, as (marker payload) slices.
+fn app1s(jpeg: &[u8]) -> Vec<Vec<u8>> {
+    exif_sooc::write::app1_segments(jpeg).unwrap()
+}
+
+#[test]
+fn tags_from_a_heif_carry_its_xmp_after_its_exif() {
+    // The regression this pins: a HIF's XMP never reached the JPEG, so an
+    // in-camera star rating vanished from every archive copy.
+    let src = write("tff.hif", &heif_with_xmp(FUJI_XMP, 2, RDF));
+    let dst = write(
+        "tff.jpg",
+        &jpeg_with(&[0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0, 0, 0]),
+    );
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_exif-sooc"))
+        .arg("-TagsFromFile")
+        .arg(&src)
+        .args(["-all:all", "-overwrite_original"])
+        .arg(&dst)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = std::fs::read(&dst).unwrap();
+    let segs = app1s(&out);
+    assert_eq!(segs.len(), 2, "one EXIF and one XMP, nothing left over");
+    assert_eq!(
+        &segs[0][4..10],
+        b"Exif\0\0",
+        "EXIF first, as ExifTool orders it"
+    );
+    let xmp = &segs[1][4..];
+    assert!(xmp.starts_with(exif_sooc::write::XMP_HEADER));
+    assert_eq!(&xmp[exif_sooc::write::XMP_HEADER.len()..], FUJI_XMP);
+    // The destination's own EXIF was stripped, and the source's made it over.
+    assert_eq!(
+        exif_sooc::read(&dst).unwrap().camera().as_deref(),
+        Some("FUJIFILM X-T50")
+    );
+}
+
 #[test]
 fn raf_reduces_to_its_embedded_jpeg() {
     let jpeg = jpeg_with(&tiff());

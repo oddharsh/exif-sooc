@@ -464,7 +464,8 @@ fn run_write(
             };
             // A JPEG source hands over its segments verbatim, which carries
             // XMP and anything else this crate has no table for. Any other
-            // container has its EXIF wrapped into a fresh segment.
+            // container has its EXIF wrapped into a fresh segment, and a HEIF
+            // its XMP packet into a second one.
             let segs = if bytes.starts_with(&[0xFF, 0xD8]) {
                 match write::app1_segments(&bytes) {
                     Ok(v) => v,
@@ -481,13 +482,33 @@ fn run_write(
                         return 1;
                     }
                 };
-                match write::app1_from_tiff(&tiff) {
+                let mut segs = match write::app1_from_tiff(&tiff) {
                     Ok(seg) => vec![seg],
                     Err(e) => {
                         eprintln!("exif-sooc: {}: {e}", src.display());
                         return 1;
                     }
+                };
+                // A HEIF's XMP is a second item. ExifTool carries it into its
+                // own APP1 after the EXIF, so this does too; dropping it would
+                // lose an in-camera star rating, which lives nowhere else.
+                let xmp = match exif_sooc::heif_xmp(src) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        eprintln!("exif-sooc: {}: {e}", src.display());
+                        return 1;
+                    }
+                };
+                if let Some(packet) = xmp {
+                    match write::app1_from_xmp(&packet) {
+                        Ok(seg) => segs.push(seg),
+                        Err(e) => {
+                            eprintln!("exif-sooc: {}: {e}", src.display());
+                            return 1;
+                        }
+                    }
                 }
+                segs
             };
             let segs = match force_orientation {
                 None => segs,

@@ -11,7 +11,8 @@
 //!                             and COM, leaving the coding segments and scan
 //!   -TagsFromFile SRC -all:all  strips the destination the same way, then
 //!                             inserts the source's APP1 segments (EXIF and
-//!                             XMP) directly after SOI
+//!                             XMP) directly after SOI. From a HEIF, where
+//!                             both are items, EXIF then XMP
 //!
 //! The entropy-coded scan is never touched, so both operations are lossless in
 //! the strict sense: the pixels are the same bytes afterwards.
@@ -99,7 +100,38 @@ pub fn app1_from_tiff(tiff: &[u8]) -> Result<Vec<u8>, String> {
     Ok(seg)
 }
 
+/// The namespace string that opens a standard XMP APP1 segment, NUL included.
+pub const XMP_HEADER: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+
+/// Wrap an XMP packet as an APP1 segment.
+///
+/// The HEIF path again: its XMP is an item, so the segment has to be built. The
+/// packet goes in as the source wrote it, padding included. ExifTool instead
+/// reserializes it with its own 2 KB of padding, so on a Fujifilm HIF, whose
+/// packet is 293 bytes of XMP inside a 12,288-byte writable packet, the
+/// verbatim copy is the larger one: 12.3 KB of segment against ExifTool's 2.8.
+/// Same trade as the EXIF copy, more faithful and larger.
+pub fn app1_from_xmp(packet: &[u8]) -> Result<Vec<u8>, String> {
+    let len = packet.len() + XMP_HEADER.len() + 2;
+    if len > 0xFFFF {
+        // Past one segment ExifTool splits the packet into Extended XMP, keyed
+        // by an MD5 of the whole. Refusing beats dropping it or truncating it.
+        return Err(format!(
+            "XMP is {} bytes, too large for one APP1 segment (Extended XMP is not written)",
+            packet.len()
+        ));
+    }
+    let mut seg = vec![0xFF, 0xE1];
+    seg.extend_from_slice(&(len as u16).to_be_bytes());
+    seg.extend_from_slice(XMP_HEADER);
+    seg.extend_from_slice(packet);
+    Ok(seg)
+}
+
 /// Overwrite EXIF Orientation inside an APP1 segment.
+///
+/// An XMP segment is refused, so a caller mapping this over every segment
+/// leaves it alone. Its `tiff:Orientation`, if any, is not rewritten.
 ///
 /// The one tag worth being able to set. When metadata is copied onto an export
 /// whose rotation is already baked into its pixels, carrying the source's
@@ -363,6 +395,23 @@ mod tests {
         let tiff = vec![0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let seg = app1_from_tiff(&tiff).unwrap();
         assert_eq!(set_orientation(&seg, 1).unwrap(), seg);
+    }
+
+    #[test]
+    fn an_xmp_packet_becomes_a_well_formed_app1() {
+        let packet = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
+        let seg = app1_from_xmp(packet).unwrap();
+        assert_eq!(&seg[..2], &[0xFF, 0xE1]);
+        assert_eq!(u16::from_be_bytes([seg[2], seg[3]]) as usize, seg.len() - 2);
+        assert_eq!(&seg[4..4 + XMP_HEADER.len()], XMP_HEADER);
+        assert!(seg.ends_with(packet), "the packet is carried verbatim");
+    }
+
+    #[test]
+    fn an_oversized_xmp_is_refused_rather_than_truncated() {
+        // 65,535 minus the length field and the 29-byte header is the ceiling.
+        assert!(app1_from_xmp(&vec![b' '; 65_504]).is_ok());
+        assert!(app1_from_xmp(&vec![b' '; 65_505]).is_err());
     }
 
     #[test]

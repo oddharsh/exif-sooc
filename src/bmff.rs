@@ -4,6 +4,9 @@
 //! EXIF, `iloc` says where its bytes are, and the bytes themselves open with a
 //! header before the TIFF starts.
 //!
+//! XMP is an item too, of type `mime` with content type `application/rdf+xml`,
+//! and its bytes are the packet itself with no header to skip.
+//!
 //! ExifTool: QuickTime.pm ParseItemLocation and HandleItemInfo.
 
 use crate::read::Source;
@@ -79,8 +82,11 @@ fn meta_end(d: &[u8]) -> Option<usize> {
     None
 }
 
-/// Return the TIFF block of the EXIF item, and its absolute file position.
-pub fn exif(src: &mut Source) -> Option<(Vec<u8>, u64)> {
+/// The extents of the first item `want` accepts.
+///
+/// Owned, so the borrow of the window ends here and the caller can go on to
+/// read the payload through the same `Source`.
+fn item_extents(src: &mut Source, want: impl Fn(&Entry) -> bool) -> Option<Vec<(u64, usize)>> {
     // The `meta` box declares its own size, so one look at the box headers says
     // whether the window holds all of it.
     if let Some(need) = meta_end(src.front()) {
@@ -95,23 +101,62 @@ pub fn exif(src: &mut Source) -> Option<(Vec<u8>, u64)> {
     let kids_at = meta.at + 4;
 
     let iinf = find(kids, kids_at, b"iinf")?;
-    let item = exif_item_id(iinf.body)?;
+    let item = item_id(iinf.body, want)?;
     let iloc = find(kids, kids_at, b"iloc")?;
-    let (offset, len) = locate(iloc.body, item)?;
+    extents(iloc.body, item)
+}
 
+/// Return the TIFF block of the EXIF item, and its absolute file position.
+pub fn exif(src: &mut Source) -> Option<(Vec<u8>, u64)> {
+    let (offset, len) = *item_extents(src, |e| e.kind == *b"Exif")?.first()?;
     let payload = src.range(offset, len).ok()?;
     let start = tiff_start(&payload)?;
     Some((payload[start..].to_vec(), offset + start as u64))
 }
 
-/// The item ID whose type is `Exif`.
+/// Return the XMP packet, verbatim.
+///
+/// Every extent is read and joined. A camera writes one, but an item MAY be
+/// split, and taking only the first would hand back a packet that stops
+/// mid-element, which still looks like XMP to anything that does not parse it.
+///
+/// An item whose `content_encoding` is set (the spec names `deflate`) is
+/// reported as absent rather than inflated or passed through: the bytes are
+/// not a packet, and no camera measured writes one.
+/// ExifTool: QuickTime.pm HandleItemInfo, the `mime` branch
+pub fn xmp(src: &mut Source) -> Option<Vec<u8>> {
+    let spans = item_extents(src, |e| {
+        e.kind == *b"mime"
+            && e.content_type == b"application/rdf+xml"
+            && e.content_encoding.is_empty()
+    })?;
+    let mut packet = Vec::new();
+    for (offset, len) in spans {
+        packet.extend_from_slice(&src.range(offset, len).ok()?);
+    }
+    (!packet.is_empty()).then_some(packet)
+}
+
+/// The fields of an `infe` box a caller can match on.
+struct Entry<'a> {
+    kind: [u8; 4],
+    /// Only a `mime` item carries these; empty otherwise.
+    content_type: &'a [u8],
+    content_encoding: &'a [u8],
+}
+
+/// The ID of the first item `want` accepts.
 ///
 /// The item-ID width is the detail that catches people: versions 0, 1 and 2 of
 /// an `infe` box store 16 bits and only version 3 stores 32. Every camera
 /// measured writes version 2, so reading it as 32-bit rejects the entry for
 /// being too short and finds no EXIF at all.
+///
+/// After the type come NUL-terminated strings: `item_name`, then for a `mime`
+/// item `content_type` and an optional `content_encoding`, which a writer may
+/// omit entirely by ending the box.
 /// ExifTool: QuickTime.pm ParseItemInfoEntry
-fn exif_item_id(iinf: &[u8]) -> Option<u32> {
+fn item_id(iinf: &[u8], want: impl Fn(&Entry) -> bool) -> Option<u32> {
     let version = *iinf.first()?;
     let (count, mut off) = if version == 0 {
         (
@@ -133,7 +178,24 @@ fn exif_item_id(iinf: &[u8]) -> Option<u32> {
             } else {
                 (u32::from_be_bytes(b.body.get(4..8)?.try_into().ok()?), 10)
             };
-            if b.body.get(type_at..type_at + 4)? == b"Exif" {
+            let kind: [u8; 4] = b.body.get(type_at..type_at + 4)?.try_into().ok()?;
+            // name, content_type, content_encoding: a missing string is empty.
+            let mut strings = b.body.get(type_at + 4..)?.split(|&c| c == 0);
+            let _name = strings.next();
+            let (content_type, content_encoding) = if &kind == b"mime" {
+                (
+                    strings.next().unwrap_or_default(),
+                    strings.next().unwrap_or_default(),
+                )
+            } else {
+                (&[][..], &[][..])
+            };
+            let entry = Entry {
+                kind,
+                content_type,
+                content_encoding,
+            };
+            if want(&entry) {
                 return Some(id);
             }
         }
@@ -145,13 +207,13 @@ fn exif_item_id(iinf: &[u8]) -> Option<u32> {
     None
 }
 
-/// Where item `want` lives, as an absolute offset and length.
+/// Where item `want` lives, as absolute (offset, length) extents in order.
 ///
 /// The field widths are stored in the box: one packed u16 carries four nibbles
 /// giving the byte size of the offset, length, base-offset and index fields, so
 /// the entry stride is per-file rather than fixed.
 /// ExifTool: QuickTime.pm ParseItemLocation
-fn locate(iloc: &[u8], want: u32) -> Option<(u64, usize)> {
+fn extents(iloc: &[u8], want: u32) -> Option<Vec<(u64, usize)>> {
     let version = *iloc.first()?;
     let sizes = u16::from_be_bytes(iloc.get(4..6)?.try_into().ok()?);
     let (osz, lsz, bsz, isz) = (
@@ -202,21 +264,19 @@ fn locate(iloc: &[u8], want: u32) -> Option<(u64, usize)> {
         let extents = u16::from_be_bytes(iloc.get(p..p + 2)?.try_into().ok()?);
         p += 2;
 
-        let mut first: Option<(u64, usize)> = None;
+        let mut spans = Vec::with_capacity(extents as usize);
         for _ in 0..extents {
             if version == 1 || version == 2 {
                 var(iloc, &mut p, isz)?;
             }
             let off = var(iloc, &mut p, osz)?;
             let len = var(iloc, &mut p, lsz)?;
-            if first.is_none() {
-                first = Some((base.checked_add(off)?, len as usize));
-            }
+            spans.push((base.checked_add(off)?, len as usize));
         }
         // Construction method 1 puts the bytes in an `idat` box, which this
         // does not read; reporting nothing beats reporting the wrong bytes.
         if id == want && construction == 0 && dref == 0 {
-            return first;
+            return (!spans.is_empty()).then_some(spans);
         }
     }
     None
