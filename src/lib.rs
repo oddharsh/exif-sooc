@@ -1,7 +1,7 @@
 //! Read camera metadata out of straight-out-of-camera files.
 //!
 //! Built for a specific job: pull the fields a photographer cares about, and
-//! the whole Fujifilm film recipe, out of a folder of JPEG, HEIF and RAF files
+//! the whole Fujifilm film recipe, out of a folder of JPEG, HEIF, RAF and JPEG XL files
 //! without reading gigabytes to do it.
 //!
 //! ```no_run
@@ -20,6 +20,7 @@ mod fuji;
 mod fuji_tags;
 mod jpeg;
 pub mod json;
+mod jxl;
 mod raf;
 mod read;
 pub mod site;
@@ -39,6 +40,8 @@ pub enum Format {
     Raf,
     /// A TIFF-family file, which is what a Leica DNG is.
     Dng,
+    /// A JPEG XL container (or a bare codestream, which holds no metadata).
+    Jxl,
 }
 
 impl Format {
@@ -48,6 +51,7 @@ impl Format {
             Format::Heif => "HEIF",
             Format::Raf => "RAF",
             Format::Dng => "DNG",
+            Format::Jxl => "JXL",
         }
     }
 }
@@ -118,14 +122,21 @@ pub enum Error {
     Unsupported,
     /// The container parsed but carries no EXIF.
     NoExif,
+    /// The EXIF is there but Brotli-compressed, which a JPEG XL encoder does
+    /// by default and this dependency-free crate cannot inflate.
+    Compressed,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Io(e) => write!(f, "{e}"),
-            Error::Unsupported => write!(f, "not a JPEG, HEIF or RAF"),
+            Error::Unsupported => write!(f, "not a JPEG, HEIF, RAF or JPEG XL"),
             Error::NoExif => write!(f, "no EXIF found"),
+            Error::Compressed => write!(
+                f,
+                "EXIF is Brotli-compressed (a brob box); re-encode with cjxl --compress_boxes=0"
+            ),
         }
     }
 }
@@ -157,21 +168,52 @@ pub fn exif_tiff(path: impl AsRef<Path>) -> Result<Vec<u8>, Error> {
             (t, base + off)
         }
         Format::Dng => (src.front().to_vec(), 0),
+        Format::Jxl => jxl_exif(&mut src)?,
     };
     Ok(tiff)
 }
 
-/// The XMP packet of a HEIF, verbatim, or `None` when it carries none.
+/// The XMP packet of a HEIF or a JPEG XL, verbatim, or `None` when it
+/// carries none.
 ///
-/// HEIF only, because that is the one container whose XMP cannot travel as a
+/// Those two because they are the containers whose XMP cannot travel as a
 /// segment: a JPEG source's APP1 segments are copied whole, XMP included, and
-/// nothing here reads XMP out of a RAF's embedded preview.
+/// nothing here reads XMP out of a RAF's embedded preview. The name predates
+/// JPEG XL and stays so callers keep compiling.
 pub fn heif_xmp(path: impl AsRef<Path>) -> Result<Option<Vec<u8>>, Error> {
     let mut src = read::Source::open(path.as_ref())?;
     match sniff(src.front()).ok_or(Error::Unsupported)? {
         Format::Heif => Ok(bmff::xmp(&mut src)),
+        Format::Jxl => match jxl::xmp(&mut src) {
+            jxl::Found::Plain(p) => Ok(Some(p)),
+            jxl::Found::Compressed => Err(Error::Compressed),
+            jxl::Found::Absent => Ok(None),
+        },
         _ => Ok(None),
     }
+}
+
+/// A JPEG XL's TIFF block, telling a compressed box apart from a missing one.
+fn jxl_exif(src: &mut read::Source) -> Result<(Vec<u8>, u64), Error> {
+    match jxl::exif(src) {
+        jxl::Found::Plain(t) => Ok(t),
+        jxl::Found::Compressed => Err(Error::Compressed),
+        jxl::Found::Absent => Err(Error::NoExif),
+    }
+}
+
+/// Rebuild a JPEG XL container with new metadata boxes; see `jxl::rewrite`.
+pub fn jxl_rewrite(
+    file: &[u8],
+    tiff: Option<&[u8]>,
+    xmp: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    jxl::rewrite(file, tiff, xmp)
+}
+
+/// Is this a JPEG XL file, container or bare codestream?
+pub fn is_jxl(head: &[u8]) -> bool {
+    head.starts_with(&jxl::SIGNATURE) || head.starts_with(&jxl::CODESTREAM)
 }
 
 /// Read one file.
@@ -203,6 +245,7 @@ pub fn read(path: impl AsRef<Path>) -> Result<Photo, Error> {
             src.ensure(want)?;
             (src.front().to_vec(), 0)
         }
+        Format::Jxl => jxl_exif(&mut src)?,
     };
 
     let mut tags = Vec::new();
@@ -391,6 +434,7 @@ fn mime(f: Format) -> &'static str {
         Format::Heif => "image/heif",
         Format::Raf => "image/x-fujifilm-raf",
         Format::Dng => "image/x-adobe-dng",
+        Format::Jxl => "image/jxl",
     }
 }
 
@@ -400,6 +444,11 @@ fn sniff(head: &[u8]) -> Option<Format> {
     }
     if head.starts_with(raf::MAGIC) {
         return Some(Format::Raf);
+    }
+    // Before the ftyp test: a JPEG XL container's ftyp is its second box, and
+    // its first is a signature box that `ftyp` at byte 4 would never match.
+    if is_jxl(head) {
+        return Some(Format::Jxl);
     }
     if head.get(4..8)? == b"ftyp" {
         return Some(Format::Heif);

@@ -15,15 +15,15 @@ USAGE:
     exif-sooc [OPTIONS] [-TAG...] <PATH>...
 
     A PATH may be a file or a directory. Directories are scanned for
-    .jpg .jpeg .heif .heic .hif .raf .dng .tif .tiff
+    .jpg .jpeg .heif .heic .hif .raf .dng .tif .tiff .jxl
 
 TAG SELECTION (as in ExifTool)
     -Make -Model          only these tags, keys unqualified
     -FujiFilm:Sharpness   disambiguate by group when two tags share a name
     -Orientation#         the raw value rather than the readable one
 
-WRITING (segments only; the scan is never touched)
-    -all=                 remove every metadata segment
+WRITING (segments or boxes only; the pixels are never touched)
+    -all=                 remove every metadata segment (JPEG) or box (JPEG XL)
     -TagsFromFile <SRC>   copy SRC's metadata onto the given files
     -overwrite_original   write in place instead of leaving a _original backup
 
@@ -441,9 +441,10 @@ fn emit_recipe(p: &Photo, out: &mut String) {
 
 /// Strip metadata segments, or copy them from another file.
 ///
-/// Both edits rebuild the JPEG around its scan without decoding it, so the
-/// pixels come out byte-identical. Anything that is not a JPEG is refused
-/// rather than rewritten, since segment surgery has no meaning elsewhere.
+/// Both edits rebuild the file around its image data without decoding it, so
+/// the pixels come out byte-identical: a JPEG around its scan, a JPEG XL
+/// container around its codestream boxes. Anything else is refused rather than
+/// rewritten, since segment surgery has no meaning elsewhere.
 fn run_write(
     files: &[PathBuf],
     from: Option<&Path>,
@@ -451,7 +452,23 @@ fn run_write(
     quiet: bool,
     force_orientation: Option<u16>,
 ) -> i32 {
-    // The source is read once, whatever container it arrives in.
+    // The source is read once, whatever container it arrives in. A JPEG XL
+    // target takes the raw TIFF block and XMP packet rather than segments.
+    let mut boxes: (Option<Vec<u8>>, Option<Vec<u8>>) = (None, None);
+    if let Some(src) = from {
+        boxes.0 = exif_sooc::exif_tiff(src).ok();
+        boxes.1 = match std::fs::read(src) {
+            Ok(b) if b.starts_with(&[0xFF, 0xD8]) => {
+                write::app1_segments(&b).ok().and_then(|segs| {
+                    segs.into_iter().find_map(|seg| {
+                        let body = seg.get(4..)?;
+                        body.strip_prefix(write::XMP_HEADER).map(|p| p.to_vec())
+                    })
+                })
+            }
+            _ => exif_sooc::heif_xmp(src).ok().flatten(),
+        };
+    }
     let insert: Vec<Vec<u8>> = match from {
         None => Vec::new(),
         Some(src) => {
@@ -535,7 +552,20 @@ fn run_write(
                 continue;
             }
         };
-        let out = match write::rewrite(&bytes, &insert) {
+        let out = if exif_sooc::is_jxl(&bytes) {
+            // A JPEG XL's orientation is a codestream field, which a decoder
+            // obeys and the EXIF copy does not change. Editing the EXIF value
+            // would make the two disagree, so the option is refused here.
+            if force_orientation.is_some() {
+                failed += 1;
+                eprintln!("{name}: a JPEG XL's orientation lives in its codestream header; -Orientation= cannot change it");
+                continue;
+            }
+            exif_sooc::jxl_rewrite(&bytes, boxes.0.as_deref(), boxes.1.as_deref())
+        } else {
+            write::rewrite(&bytes, &insert)
+        };
+        let out = match out {
             Ok(o) => o,
             Err(e) => {
                 failed += 1;
@@ -571,8 +601,8 @@ fn run_write(
     }
 }
 
-const EXTS: [&str; 9] = [
-    "jpg", "jpeg", "heif", "heic", "hif", "raf", "dng", "tif", "tiff",
+const EXTS: [&str; 10] = [
+    "jpg", "jpeg", "heif", "heic", "hif", "raf", "dng", "tif", "tiff", "jxl",
 ];
 
 fn expand(paths: &[PathBuf], recurse: bool) -> Vec<PathBuf> {

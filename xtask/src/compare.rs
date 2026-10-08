@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const EXTS: &[&str] = &[
-    "jpg", "jpeg", "heif", "heic", "hif", "raf", "dng", "tif", "tiff",
+    "jpg", "jpeg", "heif", "heic", "hif", "raf", "dng", "tif", "tiff", "jxl",
 ];
 
 fn files_in(dir: &Path) -> Vec<PathBuf> {

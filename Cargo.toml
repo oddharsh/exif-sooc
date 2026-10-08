@@ -8,7 +8,7 @@ members = [".", "xtask"]
 
 [package]
 name = "exif-sooc"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Read camera metadata, and Fujifilm film recipes, out of SOOC files without reading the whole file"
