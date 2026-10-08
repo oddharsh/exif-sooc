@@ -352,3 +352,224 @@ fn truncated_files_do_not_panic() {
         let _ = exif_sooc::read(&p);
     }
 }
+
+// ── JPEG XL ─────────────────────────────────────────────────────────
+
+fn jbox(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+    b.extend_from_slice(kind);
+    b.extend_from_slice(body);
+    b
+}
+
+/// A container: signature, ftyp, then the given boxes in order.
+fn jxl_with(boxes: &[Vec<u8>]) -> Vec<u8> {
+    let mut d = vec![0, 0, 0, 12, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A];
+    d.extend(jbox(b"ftyp", b"jxl \0\0\0\0jxl "));
+    for b in boxes {
+        d.extend_from_slice(b);
+    }
+    d
+}
+
+/// An Exif box body: a zero offset, then the TIFF header.
+fn exif_body(tiff: &[u8]) -> Vec<u8> {
+    let mut b = 0u32.to_be_bytes().to_vec();
+    b.extend_from_slice(tiff);
+    b
+}
+
+/// tiff() naming a different body, so a copy that kept the old EXIF shows.
+fn old_tiff() -> Vec<u8> {
+    let mut t = tiff();
+    t[59..64].copy_from_slice(b"X-H2S");
+    t
+}
+
+/// The two codestream parts cjxl writes around the metadata, as stand-ins.
+fn parts() -> (Vec<u8>, Vec<u8>) {
+    (
+        jbox(b"jxlp", b"\0\0\0\0head"),
+        jbox(b"jxlp", b"\x80\0\0\x01the rest of the image"),
+    )
+}
+
+fn run(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_exif-sooc"))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn jxl_exif_is_read_from_a_plain_box() {
+    let (head, rest) = parts();
+    let p = write(
+        "t.jxl",
+        &jxl_with(&[head, jbox(b"Exif", &exif_body(&tiff())), rest]),
+    );
+    let photo = exif_sooc::read(&p).unwrap();
+    assert_eq!(photo.format, exif_sooc::Format::Jxl);
+    assert_eq!(photo.camera().as_deref(), Some("FUJIFILM X-T50"));
+    assert_eq!(photo.get("ExposureTime").unwrap().print, "1/500");
+    assert_eq!(photo.get("MIMEType").unwrap().print, "image/jxl");
+}
+
+#[test]
+fn a_brotli_compressed_exif_box_is_named_rather_than_missing() {
+    // cjxl's default: the box is `brob`, its body the inner type then Brotli.
+    let mut brob = b"Exif".to_vec();
+    brob.extend_from_slice(&[0x1b, 0x2a, 0x00, 0x00]);
+    let (head, rest) = parts();
+    let p = write("brob.jxl", &jxl_with(&[head, jbox(b"brob", &brob), rest]));
+    assert!(matches!(
+        exif_sooc::read(&p),
+        Err(exif_sooc::Error::Compressed)
+    ));
+    // Control: the same file with no metadata at all is plain NoExif.
+    let (head, rest) = parts();
+    let none = write("none.jxl", &jxl_with(&[head, rest]));
+    assert!(matches!(
+        exif_sooc::read(&none),
+        Err(exif_sooc::Error::NoExif)
+    ));
+}
+
+#[test]
+fn a_bare_codestream_is_a_jxl_with_no_exif() {
+    let p = write(
+        "bare.jxl",
+        &[0xFF, 0x0A, 0xFA, 0x7A, 0x00, 0x00, 0x00, 0x00],
+    );
+    assert!(matches!(exif_sooc::read(&p), Err(exif_sooc::Error::NoExif)));
+}
+
+#[test]
+fn tags_from_a_heif_replace_only_a_jxl_s_metadata_boxes() {
+    // The job this exists for: an archive encoded from a HIF's pixels carries
+    // whatever EXIF the decoder kept (sips drops every Fujifilm maker note),
+    // and the HIF's own EXIF and XMP have to replace it without touching a
+    // codestream byte.
+    let src = write("tfj.hif", &heif_with_xmp(FUJI_XMP, 1, RDF));
+    let (head, rest) = parts();
+    let mut stale_xmp = b"xml ".to_vec();
+    stale_xmp.extend_from_slice(&[0x1b, 0x00]);
+    let before = jxl_with(&[
+        head.clone(),
+        jbox(b"Exif", &exif_body(&old_tiff())),
+        jbox(b"brob", &stale_xmp),
+        rest.clone(),
+    ]);
+    let dst = write("tfj.jxl", &before);
+    let out = run(&[
+        "-TagsFromFile".as_ref(),
+        src.as_os_str(),
+        "-all:all".as_ref(),
+        "-overwrite_original".as_ref(),
+        dst.as_os_str(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let after = std::fs::read(&dst).unwrap();
+    assert_eq!(
+        after,
+        jxl_with(&[
+            head,
+            jbox(b"Exif", &exif_body(&tiff())),
+            jbox(b"xml ", FUJI_XMP),
+            rest
+        ]),
+        "one Exif and one xml box where the old metadata was, every other box byte for byte"
+    );
+    assert_eq!(
+        exif_sooc::read(&dst).unwrap().camera().as_deref(),
+        Some("FUJIFILM X-T50")
+    );
+    assert_eq!(
+        exif_sooc::heif_xmp(&dst).unwrap().as_deref(),
+        Some(FUJI_XMP)
+    );
+}
+
+#[test]
+fn a_jxl_that_can_rebuild_a_jpeg_is_never_edited() {
+    // jbrd is how djxl rebuilds the original JPEG byte for byte, and it covers
+    // the EXIF. An edit would leave a file that decodes but no longer rebuilds.
+    let src = write("jb.hif", &heif_with_xmp(FUJI_XMP, 1, RDF));
+    let (head, rest) = parts();
+    let before = jxl_with(&[
+        head,
+        jbox(b"jbrd", b"reconstruction"),
+        jbox(b"Exif", &exif_body(&old_tiff())),
+        rest,
+    ]);
+    let dst = write("jb.jxl", &before);
+    for args in [
+        vec![
+            "-TagsFromFile".as_ref(),
+            src.as_os_str(),
+            "-all:all".as_ref(),
+        ],
+        vec!["-all=".as_ref()],
+    ] {
+        let mut args = args;
+        args.extend(["-overwrite_original".as_ref(), dst.as_os_str()]);
+        let out = run(&args);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("jbrd"));
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            before,
+            "refused means untouched"
+        );
+    }
+}
+
+#[test]
+fn strip_removes_a_jxl_s_metadata_and_keeps_its_codestream() {
+    let (head, rest) = parts();
+    let dst = write(
+        "strip.jxl",
+        &jxl_with(&[
+            head.clone(),
+            jbox(b"Exif", &exif_body(&tiff())),
+            jbox(b"xml ", FUJI_XMP),
+            rest.clone(),
+        ]),
+    );
+    let out = run(&[
+        "-all=".as_ref(),
+        "-overwrite_original".as_ref(),
+        dst.as_os_str(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&dst).unwrap(), jxl_with(&[head, rest]));
+}
+
+#[test]
+fn a_jxl_s_orientation_is_not_rewritten_through_exif() {
+    // A decoder obeys the codestream's orientation field and ignores EXIF's,
+    // so changing only EXIF would make the two disagree.
+    let src = write("or.hif", &heif_with_xmp(FUJI_XMP, 1, RDF));
+    let (head, rest) = parts();
+    let before = jxl_with(&[head, rest]);
+    let dst = write("or.jxl", &before);
+    let out = run(&[
+        "-TagsFromFile".as_ref(),
+        src.as_os_str(),
+        "-all:all".as_ref(),
+        "-Orientation#=6".as_ref(),
+        "-overwrite_original".as_ref(),
+        dst.as_os_str(),
+    ]);
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read(&dst).unwrap(), before);
+}

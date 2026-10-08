@@ -1,7 +1,7 @@
 # exif-sooc
 
 Camera metadata, and the whole Fujifilm film recipe, out of a folder of
-straight-out-of-camera files. JPEG, HEIF/HEIC, RAF and DNG.
+straight-out-of-camera files. JPEG, HEIF/HEIC, RAF, DNG and JPEG XL.
 
 Reads a 16 KB window instead of the file, speaks ExifTool's command line, and
 proves itself by agreeing with ExifTool on every tag it prints.
@@ -173,6 +173,39 @@ writable padding where ExifTool would re-pad to 2 KB. A deflate-encoded packet
 is skipped rather than copied, and one too large for a single segment is
 refused, since this does not write Extended XMP.
 
+### JPEG XL
+
+A JPEG XL container keeps its metadata in boxes: EXIF in an `Exif` box (a
+four-byte offset, then the TIFF block, the same shape as a HEIF's EXIF item)
+and XMP in an `xml ` box. Both operations work on those boxes the way they work
+on JPEG segments. `-all=` drops `Exif`, `xml ` and `jumb`, and
+`-TagsFromFile` puts the source's EXIF and XMP where the old metadata was. Every
+other box is copied byte for byte, so the codestream and its pixels are
+untouched. On a 40 MP frame encoded from a HIF, copying the HIF's metadata
+across leaves 12.5 MB of codestream boxes byte-identical, the 16-bit decode
+identical, and all 71 tags in agreement with ExifTool.
+
+That is the job it was added for. A JPEG XL encoded from a decoded HIF carries
+whatever EXIF the decoder kept, and macOS `sips` keeps 40 of a Fujifilm HIF's
+75 tags. Every maker note is gone, film simulation and grain included.
+`-TagsFromFile file.HIF -all:all out.jxl` puts all 75 back.
+
+Three things it refuses, each because the edit would look like it worked:
+
+- **A `jbrd` box.** That is the data `djxl` uses to rebuild a losslessly
+  transcoded JPEG byte for byte, and it covers the EXIF, so changing the
+  metadata would leave a file that still decodes but no longer rebuilds.
+- **`-Orientation#=`.** A decoder obeys the codestream's own orientation field
+  and ignores EXIF's, so editing only EXIF would make the two disagree.
+- **A bare codestream** (`FF 0A`, no container), which has no box to put
+  metadata in.
+
+Reading has one gap worth knowing about. `cjxl` Brotli-compresses metadata by
+default, wrapping each box in a `brob` box, and this crate has no dependencies
+and so no Brotli decoder. A compressed `Exif` box is reported as exactly that,
+with the fix (`cjxl --compress_boxes=0`, about 5 KB on a 12.5 MB frame), rather
+than as "no EXIF".
+
 Without `-overwrite_original` a `_original` backup is left beside each file, as
 ExifTool does. A tool that edits photographs in place by default is one bad flag
 away from an unrecoverable afternoon.
@@ -294,6 +327,8 @@ the wrong aspect ratio.
 - **Every tag.** About 70 standard EXIF tags and 42 Fujifilm ones, chosen
   because a photographer reads them.
 - **Writing.** This only reads.
+- **Brotli-compressed JPEG XL metadata.** A `brob` box is named in the error
+  and left alone; encode with `cjxl --compress_boxes=0` to keep it readable.
 - **RAW image data.** RAF is read by way of its embedded JPEG, and a DNG is a
   TIFF, so both give up their metadata without decoding a single pixel.
 
@@ -308,7 +343,8 @@ as a tag SELECTION and prints JSON, so a strip silently does nothing.
 
 | version | what a caller can rely on |
 |---|---|
-| **0.3.0** | `-TagsFromFile` from a HEIF carries its XMP as well as its EXIF |
+| **0.4.0** | JPEG XL: reading `Exif` and `xml ` boxes, `-all=` and `-TagsFromFile` onto a `.jxl`, and `Error::Compressed` for a `brob` box |
+| 0.3.0 | `-TagsFromFile` from a HEIF carries its XMP as well as its EXIF |
 | 0.2.0 | writing (`-all=`, `-TagsFromFile`, `-Orientation#=`), bare `-s3` output, and progressive JPEGs surviving a strip |
 | 0.1.0 | reading only |
 
